@@ -1,9 +1,9 @@
--- Blox Fruits | hub v1
+-- Blox Fruits | hub v2
 -- executor: Delta, Xeno, Solara, Fluxus, Wave
--- sem webhook, sem HttpPost. so a UI do Rayfield e a atualizacao vem de fora.
+-- sem webhook, sem HttpPost.
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/bloxfruit-hub/main"
-local SCRIPT_VERSION = 1
+local SCRIPT_VERSION = 2
 local CONFIG_PATH = "bloxfruit_config.json"
 
 local Players = game:GetService("Players")
@@ -26,6 +26,9 @@ if previous then
         if previous.statusGui then
             previous.statusGui:Destroy()
         end
+        if previous.espFolder then
+            previous.espFolder:Destroy()
+        end
         if previous.stopFly then
             previous.stopFly()
         end
@@ -45,20 +48,21 @@ local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 local state = {
     speed = 16,
     jump = 50,
-    flySpeed = 90,
+    flySpeed = 120,
     fly = false,
     jumpFly = true,
-    maxFlyHeight = 200,
+    maxFlyHeight = 250,
     autoFarm = false,
     autoFruit = false,
     autoChest = false,
+    fastAttack = false,
+    attackDelay = 0.08,
+    farmRange = 800,
     espFruit = true,
-    espChest = false,
+    espChest = true,
     espPlayer = false,
     espMob = false,
-    highlights = {},
-    farmRange = 400,
-    attackDelay = 0.15,
+    targetName = "auto",
 }
 
 local FRUITS = {
@@ -156,18 +160,14 @@ local function status(text)
     end
 end
 
-local function character()
-    return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local function humanoid()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChildOfClass("Humanoid")
 end
 
 local function rootPart()
     local char = LocalPlayer.Character
     return char and char:FindFirstChild("HumanoidRootPart")
-end
-
-local function humanoid()
-    local char = LocalPlayer.Character
-    return char and char:FindFirstChildOfClass("Humanoid")
 end
 
 -- ===== voo: AlignPosition =====
@@ -250,7 +250,6 @@ local function updateFly(dt)
         end
         return
     end
-
     if flyRig.active and (not flyRig.align or not flyRig.align.Parent) then
         destroyRig()
     end
@@ -272,7 +271,6 @@ local function updateFly(dt)
         end
         return
     end
-
     if not flyRig.active and not buildRig() then
         return
     end
@@ -369,137 +367,231 @@ local function touchSweep(seconds)
     flyRig.align.Position = center
 end
 
--- ===== alvos =====
-local function findFruits()
-    local found = {}
-    local folders = {Workspace}
-    local fruitsFolder = Workspace:FindFirstChild("Fruits")
-    if fruitsFolder then
-        folders[#folders + 1] = fruitsFolder
+-- ===== descoberta de alvos =====
+local function isPlayerCharacter(model)
+    return Players:GetPlayerFromCharacter(model) ~= nil
+end
+
+local function aliveRoot(model)
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then
+        return nil
     end
-    for _, folder in ipairs(folders) do
-        for _, object in ipairs(folder:GetChildren()) do
-            if object:IsA("Model") and FRUITS[object.Name] and object:FindFirstChild("Handle") then
-                found[#found + 1] = object
-            end
+    return model:FindFirstChild("HumanoidRootPart")
+            or model:FindFirstChild("UpperTorso")
+            or model:FindFirstChildWhichIsA("BasePart")
+end
+
+local function collectEnemies()
+    local out = {}
+    local seen = {}
+    local function consider(model)
+        if seen[model] or model == LocalPlayer.Character then
+            return
         end
-    end
-    return found
-end
-
-local function findChests()
-    local found = {}
-    local folders = {Workspace}
-    local chestFolder = Workspace:FindFirstChild("Chests")
-    if chestFolder then
-        folders[#folders + 1] = chestFolder
-    end
-    for _, folder in ipairs(folders) do
-        for _, object in ipairs(folder:GetChildren()) do
-            if object.Name == "Chest" and object:IsA("Model") then
-                found[#found + 1] = object
-            end
+        seen[model] = true
+        if isPlayerCharacter(model) then
+            return
         end
-    end
-    return found
-end
-
-local function enemyRoot(mob)
-    local hum = mob:FindFirstChildOfClass("Humanoid")
-    local root = mob:FindFirstChild("HumanoidRootPart")
-    if hum and root and hum.Health > 0 then
-        return root, hum
-    end
-    return nil, nil
-end
-
-local function nearestEnemy()
-    local enemies = Workspace:FindFirstChild("Enemies")
-    if not enemies then
-        return nil, math.huge
-    end
-    local mine = rootPart()
-    if not mine then
-        return nil, math.huge
-    end
-    local best, bestDistance = nil, math.huge
-    for _, mob in ipairs(enemies:GetChildren()) do
-        local root = enemyRoot(mob)
+        local root = aliveRoot(model)
         if root then
-            local distance = (root.Position - mine.Position).Magnitude
-            if distance < bestDistance then
-                best, bestDistance = mob, distance
+            out[#out + 1] = {model = model, part = root}
+        end
+    end
+
+    local enemies = Workspace:FindFirstChild("Enemies")
+    if enemies then
+        for _, model in ipairs(enemies:GetChildren()) do
+            if model:IsA("Model") then
+                consider(model)
             end
         end
     end
-    return best, bestDistance
-end
 
--- ===== ESP =====
-local function clearEsp()
-    for model, highlight in pairs(state.highlights) do
-        pcall(function()
-            highlight:Destroy()
-        end)
-        state.highlights[model] = nil
+    if #out == 0 then
+        for _, model in ipairs(Workspace:GetChildren()) do
+            if model:IsA("Model") then
+                consider(model)
+            end
+        end
     end
+    return out
 end
 
-local function paint(model, fill, outline)
-    if not model or state.highlights[model] then
+local function collectFruits()
+    local out = {}
+    local function consider(object)
+        local handle = object:FindFirstChild("Handle")
+                or object:FindFirstChildWhichIsA("BasePart")
+        if handle then
+            out[#out + 1] = {model = object, part = handle}
+        end
+    end
+
+    for _, object in ipairs(Workspace:GetChildren()) do
+        if object:IsA("Model") or object:IsA("Tool") then
+            local lower = string.lower(object.Name)
+            if FRUITS[object.Name] or string.find(lower, "fruit", 1, true) then
+                consider(object)
+            end
+        end
+    end
+
+    local folder = Workspace:FindFirstChild("Fruits")
+    if folder then
+        for _, object in ipairs(folder:GetChildren()) do
+            consider(object)
+        end
+    end
+    return out
+end
+
+local function collectChests()
+    local out = {}
+    local function consider(object)
+        local part = object:FindFirstChildWhichIsA("BasePart") or object
+        if part and part:IsA("BasePart") then
+            out[#out + 1] = {model = object, part = part}
+        end
+    end
+
+    for _, object in ipairs(Workspace:GetChildren()) do
+        if string.find(string.lower(object.Name), "chest", 1, true) then
+            consider(object)
+        end
+    end
+
+    local folder = Workspace:FindFirstChild("Chests")
+    if folder then
+        for _, object in ipairs(folder:GetChildren()) do
+            consider(object)
+        end
+    end
+    return out
+end
+
+-- ===== ESP limpo =====
+local espFolder = nil
+
+local function uiRoot()
+    if type(gethui) == "function" then
+        local ok, value = pcall(gethui)
+        if ok and value then
+            return value
+        end
+    end
+    return game:GetService("CoreGui")
+end
+
+espFolder = Instance.new("Folder")
+espFolder.Name = "BloxEsp"
+pcall(function()
+    espFolder.Parent = uiRoot()
+end)
+session.espFolder = espFolder
+
+local espItems = {}
+
+local function removeEsp(model)
+    local item = espItems[model]
+    if not item then
         return
     end
+    for _, object in ipairs(item) do
+        pcall(function()
+            object:Destroy()
+        end)
+    end
+    espItems[model] = nil
+end
+
+local function ensureEsp(model, part, color, text)
+    local item = espItems[model]
+    if item and item[1] and item[1].Parent then
+        if item[3] then
+            local distance = (rootPart() and (part.Position - rootPart().Position).Magnitude) or 0
+            item[3].Text = string.format("%s  [%d]", text, math.floor(distance))
+        end
+        return
+    end
+
     local highlight = Instance.new("Highlight")
-    highlight.FillColor = fill
-    highlight.FillTransparency = 0.55
-    highlight.OutlineColor = outline
+    highlight.FillTransparency = 1
+    highlight.OutlineColor = color
+    highlight.OutlineTransparency = 0
     highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     highlight.Adornee = model
-    highlight.Parent = model
-    state.highlights[model] = highlight
+    highlight.Parent = espFolder
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Size = UDim2.fromOffset(160, 26)
+    billboard.StudsOffset = Vector3.new(0, 4, 0)
+    billboard.AlwaysOnTop = true
+    billboard.MaxDistance = 2000
+    billboard.Adornee = part
+    billboard.Parent = espFolder
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 14
+    label.TextColor3 = color
+    label.TextStrokeTransparency = 0.4
+    label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    label.Text = text
+    label.Parent = billboard
+
+    espItems[model] = {highlight, billboard, label}
 end
 
-local function drawEsp()
-    if not (state.espFruit or state.espChest or state.espPlayer or state.espMob) then
-        clearEsp()
-        return
-    end
+local function refreshEsp()
+    local active = {}
     if state.espFruit then
-        for _, fruit in ipairs(findFruits()) do
-            paint(fruit, Color3.fromRGB(255, 200, 0), Color3.fromRGB(255, 255, 255))
+        for _, fruit in ipairs(collectFruits()) do
+            active[fruit.model] = true
+            ensureEsp(fruit.model, fruit.part, Color3.fromRGB(255, 200, 60), fruit.model.Name)
         end
     end
     if state.espChest then
-        for _, chest in ipairs(findChests()) do
-            paint(chest, Color3.fromRGB(0, 200, 90), Color3.fromRGB(255, 255, 255))
+        for _, chest in ipairs(collectChests()) do
+            active[chest.model] = true
+            ensureEsp(chest.model, chest.part, Color3.fromRGB(60, 220, 120), "bau")
+        end
+    end
+    if state.espMob then
+        for _, enemy in ipairs(collectEnemies()) do
+            active[enemy.model] = true
+            ensureEsp(enemy.model, enemy.part, Color3.fromRGB(255, 80, 80), enemy.model.Name)
         end
     end
     if state.espPlayer then
         for _, player in ipairs(Players:GetPlayers()) do
             if player ~= LocalPlayer and player.Character then
-                paint(player.Character, Color3.fromRGB(60, 140, 255), Color3.fromRGB(255, 255, 255))
+                local root = player.Character:FindFirstChild("HumanoidRootPart")
+                if root then
+                    active[player.Character] = true
+                    ensureEsp(player.Character, root, Color3.fromRGB(80, 160, 255), player.Name)
+                end
             end
         end
     end
-    if state.espMob then
-        local enemies = Workspace:FindFirstChild("Enemies")
-        if enemies then
-            for _, mob in ipairs(enemies:GetChildren()) do
-                if enemyRoot(mob) then
-                    paint(mob, Color3.fromRGB(255, 60, 60), Color3.fromRGB(255, 255, 255))
-                end
-            end
+
+    for model in pairs(espItems) do
+        if not active[model] or not model.Parent then
+            removeEsp(model)
         end
     end
 end
 
 -- ===== combate =====
-local function activateTool()
+local function currentTool()
     local char = LocalPlayer.Character
-    if not char then
-        return false
-    end
-    local tool = char:FindFirstChildOfClass("Tool")
+    return char and char:FindFirstChildOfClass("Tool")
+end
+
+local function activateTool()
+    local tool = currentTool()
     if not tool then
         return false
     end
@@ -509,7 +601,35 @@ local function activateTool()
     return true
 end
 
-local function withRig(fn)
+local function pickTarget()
+    local enemies = collectEnemies()
+    if #enemies == 0 then
+        return nil, math.huge
+    end
+    local mine = rootPart()
+    if not mine then
+        return nil, math.huge
+    end
+    local best, bestDistance = nil, math.huge
+    for _, enemy in ipairs(enemies) do
+        if state.targetName == "auto" or enemy.model.Name == state.targetName then
+            local distance = (enemy.part.Position - mine.Position).Magnitude
+            if distance < bestDistance then
+                best, bestDistance = enemy, distance
+            end
+        end
+    end
+    return best, bestDistance
+end
+
+local function farmCycle()
+    local enemy, distance = pickTarget()
+    if not enemy or distance > state.farmRange then
+        status("farm: sem alvo em " .. math.floor(state.farmRange) .. " studs")
+        return false
+    end
+    status(string.format("farm: %s | %d studs", enemy.model.Name, math.floor(distance)))
+
     local owned = false
     if not flyRig.active then
         if not buildRig() then
@@ -517,79 +637,85 @@ local function withRig(fn)
         end
         owned = true
     end
-    local ok, result = pcall(fn)
+
+    local target = enemy.part.Position + Vector3.new(0, 3, 0)
+    travelTo(target, state.flySpeed)
+
+    local started = os.clock()
+    while os.clock() - started < 3 and _G.__bloxHub == session do
+        if not enemy.model.Parent or not aliveRoot(enemy.model) then
+            break
+        end
+        local mine = rootPart()
+        if mine and (enemy.part.Position - mine.Position).Magnitude > 14 then
+            flyRig.target = enemy.part.Position + Vector3.new(0, 3, 0)
+            flyRig.align.Position = flyRig.target
+        end
+        activateTool()
+        task.wait(state.attackDelay)
+    end
+
     if owned then
         destroyRig()
     end
-    return ok and result
-end
-
-local function farmCycle()
-    local mob, distance = nearestEnemy()
-    if not mob or distance > state.farmRange then
-        status("farm: nenhum inimigo na area")
-        return false
-    end
-    local target, hum = enemyRoot(mob)
-    if not target then
-        return false
-    end
-    status(string.format("farm: %s | %d studs", mob.Name, math.floor(distance)))
-    return withRig(function()
-        travelTo(target.Position + Vector3.new(0, 3, 0), state.flySpeed)
-        local started = os.clock()
-        while os.clock() - started < 2.5 and _G.__bloxHub == session do
-            if not enemyRoot(mob) then
-                break
-            end
-            activateTool()
-            task.wait(state.attackDelay)
-        end
-        return true
-    end)
+    return true
 end
 
 local function fruitCycle()
-    local fruits = findFruits()
+    local fruits = collectFruits()
     if #fruits == 0 then
         status("fruta: nenhuma no mapa")
         return false
     end
     local fruit = fruits[1]
-    local handle = fruit:FindFirstChild("Handle")
-    if not handle then
-        return false
-    end
-    status("fruta: indo pegar " .. fruit.Name)
-    return withRig(function()
-        if travelTo(handle.Position + Vector3.new(0, 3, 0), state.flySpeed) then
-            touchSweep(0.9)
-            status("fruta: " .. fruit.Name .. " no alcance")
-            return true
+    status("fruta: indo em " .. fruit.model.Name)
+
+    local owned = false
+    if not flyRig.active then
+        if not buildRig() then
+            return false
         end
-        return false
-    end)
+        owned = true
+    end
+
+    local ok = travelTo(fruit.part.Position + Vector3.new(0, 3, 0), state.flySpeed)
+    if ok then
+        touchSweep(1.0)
+        status("fruta: " .. fruit.model.Name .. " ao alcance")
+    end
+
+    if owned then
+        destroyRig()
+    end
+    return ok
 end
 
 local function chestCycle()
-    local chests = findChests()
+    local chests = collectChests()
     if #chests == 0 then
         status("bau: nenhum no mapa")
         return false
     end
     local chest = chests[1]
-    local part = chest:FindFirstChildWhichIsA("BasePart")
-    if not part then
-        return false
-    end
     status("bau: indo abrir")
-    return withRig(function()
-        if travelTo(part.Position + Vector3.new(0, 3, 0), state.flySpeed) then
-            touchSweep(0.8)
-            return true
+
+    local owned = false
+    if not flyRig.active then
+        if not buildRig() then
+            return false
         end
-        return false
-    end)
+        owned = true
+    end
+
+    local ok = travelTo(chest.part.Position + Vector3.new(0, 3, 0), state.flySpeed)
+    if ok then
+        touchSweep(0.8)
+    end
+
+    if owned then
+        destroyRig()
+    end
+    return ok
 end
 
 local function applyMovement()
@@ -602,16 +728,6 @@ local function applyMovement()
 end
 
 -- ===== interface =====
-local function uiRoot()
-    if type(gethui) == "function" then
-        local ok, value = pcall(gethui)
-        if ok and value then
-            return value
-        end
-    end
-    return game:GetService("CoreGui")
-end
-
 local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     or LocalPlayer:WaitForChild("PlayerGui", 10)
 
@@ -667,8 +783,8 @@ local statusGui = makeGui("BloxStatus", 999998)
 statusGui.Enabled = true
 
 local statusText = Instance.new("TextLabel")
-statusText.Size = UDim2.fromOffset(320, 30)
-statusText.Position = UDim2.new(0.5, -160, 1, -70)
+statusText.Size = UDim2.fromOffset(340, 30)
+statusText.Position = UDim2.new(0.5, -170, 1, -70)
 statusText.BackgroundColor3 = Color3.fromRGB(14, 17, 23)
 statusText.BackgroundTransparency = 0.2
 statusText.BorderSizePixel = 0
@@ -802,8 +918,8 @@ local Window = Rayfield:CreateWindow({
 
 session.window = Window
 
-local speedSlider, jumpSlider, flySlider, rangeSlider
-local espFruitToggle, espChestToggle, espPlayerToggle, espMobToggle, jumpFlyToggle
+local speedSlider, jumpSlider, flySlider, rangeSlider, delaySlider
+local jumpFlyToggle
 
 local MainTab = Window:CreateTab("Farm", 4483362458)
 
@@ -813,6 +929,15 @@ MainTab:CreateToggle({
     Flag = "autofarm",
     Callback = function(value)
         state.autoFarm = value
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Fast attack",
+    CurrentValue = false,
+    Flag = "fastattack",
+    Callback = function(value)
+        state.fastAttack = value
     end,
 })
 
@@ -834,9 +959,16 @@ MainTab:CreateToggle({
     end,
 })
 
+MainTab:CreateButton({
+    Name = "Atacar o mais proximo agora",
+    Callback = function()
+        farmCycle()
+    end,
+})
+
 rangeSlider = MainTab:CreateSlider({
     Name = "Alcance do farm",
-    Range = {50, 2000},
+    Range = {50, 3000},
     Increment = 50,
     Suffix = "studs",
     CurrentValue = state.farmRange,
@@ -847,10 +979,10 @@ rangeSlider = MainTab:CreateSlider({
     end,
 })
 
-MainTab:CreateSlider({
+delaySlider = MainTab:CreateSlider({
     Name = "Intervalo de ataque",
-    Range = {0.05, 1},
-    Increment = 0.05,
+    Range = {0.02, 0.5},
+    Increment = 0.01,
     Suffix = "s",
     CurrentValue = state.attackDelay,
     Flag = "attackdelay",
@@ -990,46 +1122,46 @@ MoveTab:CreateButton({
 
 local VisualTab = Window:CreateTab("Visual", 4483362458)
 
-espFruitToggle = VisualTab:CreateToggle({
+VisualTab:CreateToggle({
     Name = "ESP frutas",
     CurrentValue = state.espFruit,
     Flag = "espfruit",
     Callback = function(value)
         state.espFruit = value
-        drawEsp()
+        refreshEsp()
         markDirty()
     end,
 })
 
-espChestToggle = VisualTab:CreateToggle({
+VisualTab:CreateToggle({
     Name = "ESP baus",
     CurrentValue = state.espChest,
     Flag = "espchest",
     Callback = function(value)
         state.espChest = value
-        drawEsp()
+        refreshEsp()
         markDirty()
     end,
 })
 
-espPlayerToggle = VisualTab:CreateToggle({
-    Name = "ESP jogadores",
-    CurrentValue = state.espPlayer,
-    Flag = "espplayer",
-    Callback = function(value)
-        state.espPlayer = value
-        drawEsp()
-        markDirty()
-    end,
-})
-
-espMobToggle = VisualTab:CreateToggle({
+VisualTab:CreateToggle({
     Name = "ESP mobs",
     CurrentValue = state.espMob,
     Flag = "espmob",
     Callback = function(value)
         state.espMob = value
-        drawEsp()
+        refreshEsp()
+        markDirty()
+    end,
+})
+
+VisualTab:CreateToggle({
+    Name = "ESP jogadores",
+    CurrentValue = state.espPlayer,
+    Flag = "espplayer",
+    Callback = function(value)
+        state.espPlayer = value
+        refreshEsp()
         markDirty()
     end,
 })
@@ -1039,9 +1171,11 @@ VisualTab:CreateButton({
     Callback = function()
         state.espFruit = false
         state.espChest = false
-        state.espPlayer = false
         state.espMob = false
-        clearEsp()
+        state.espPlayer = false
+        for model in pairs(espItems) do
+            removeEsp(model)
+        end
     end,
 })
 
@@ -1060,21 +1194,65 @@ VisualTab:CreateButton({
 local InfoTab = Window:CreateTab("Info", 4483362458)
 
 InfoTab:CreateButton({
-    Name = "Listar alvos no mapa",
+    Name = "Diagnostico do mapa",
     Callback = function()
-        local fruits = findFruits()
-        local chests = findChests()
-        print("== frutas:", #fruits)
+        print("=== BLOX HUB DIAGNOSTICO ===")
+        print("versao:", SCRIPT_VERSION)
+        print("personagem:", LocalPlayer.Character and "sim" or "nao")
+        print("ferramenta:", currentTool() and currentTool().Name or "nenhuma")
+
+        local children = Workspace:GetChildren()
+        print("workspace filhos:", #children)
+        local names = {}
+        for _, child in ipairs(children) do
+            if child:IsA("Folder") then
+                names[#names + 1] = child.Name .. "(" .. #child:GetChildren() .. ")"
+            end
+        end
+        print("pastas:", table.concat(names, ", "))
+
+        local enemies = collectEnemies()
+        print("inimigos vivos:", #enemies)
+        local counted = {}
+        for _, enemy in ipairs(enemies) do
+            counted[enemy.model.Name] = (counted[enemy.model.Name] or 0) + 1
+        end
+        for name, count in pairs(counted) do
+            print("   ", name, "x" .. count)
+        end
+
+        local fruits = collectFruits()
+        print("frutas:", #fruits)
         for _, fruit in ipairs(fruits) do
-            print("   " .. fruit.Name .. " | " .. tostring(fruit:FindFirstChild("Handle")
-                    and fruit.Handle.Position or "sem handle"))
+            print("   ", fruit.model.Name, fruit.model.ClassName)
         end
-        print("== baus:", #chests)
+
+        local chests = collectChests()
+        print("baus:", #chests)
         for _, chest in ipairs(chests) do
-            print("   " .. chest:GetFullName())
+            print("   ", chest.model:GetFullName())
         end
-        local enemies = Workspace:FindFirstChild("Enemies")
-        print("== inimigos:", enemies and #enemies:GetChildren() or 0)
+    end,
+})
+
+InfoTab:CreateButton({
+    Name = "Listar nomes de mobs (para escolher)",
+    Callback = function()
+        local enemies = collectEnemies()
+        local counted = {}
+        for _, enemy in ipairs(enemies) do
+            counted[enemy.model.Name] = (counted[enemy.model.Name] or 0) + 1
+        end
+        local list = {}
+        for name, count in pairs(counted) do
+            list[#list + 1] = name .. " x" .. count
+        end
+        table.sort(list)
+        print("=== MOBS ===")
+        for _, line in ipairs(list) do
+            print(line)
+        end
+        print("total:", #enemies)
     end,
 })
 
@@ -1083,22 +1261,25 @@ InfoTab:CreateButton({
     Callback = function()
         state.speed = 18
         state.jump = 50
-        state.flySpeed = 120
-        state.maxFlyHeight = 250
-        state.farmRange = 600
-        state.attackDelay = 0.1
+        state.flySpeed = 150
+        state.maxFlyHeight = 300
+        state.farmRange = 1000
+        state.attackDelay = 0.05
         state.jumpFly = true
+        state.espFruit = true
+        state.espChest = true
         pcall(function()
             speedSlider:Set(18)
             jumpSlider:Set(50)
-            flySlider:Set(120)
-            rangeSlider:Set(600)
+            flySlider:Set(150)
+            rangeSlider:Set(1000)
+            delaySlider:Set(0.05)
             jumpFlyToggle:Set(true)
         end)
         applyMovement()
         markDirty()
         Rayfield:Notify({Title = "Perfil",
-                         Content = "Chao normal, voo 120, farm 600 studs.", Duration = 5})
+                         Content = "Voo 150, farm 1000, ataque 0.05s.", Duration = 5})
     end,
 })
 
@@ -1111,20 +1292,29 @@ LocalPlayer.CharacterAdded:Connect(function()
     destroyRig()
     task.wait(1)
     applyMovement()
-    drawEsp()
+    refreshEsp()
 end)
 
 task.spawn(function()
     while _G.__bloxHub == session do
         task.wait(0.5)
-        drawEsp()
+        refreshEsp()
         applyMovement()
     end
 end)
 
 task.spawn(function()
     while _G.__bloxHub == session do
-        task.wait(0.6)
+        task.wait(0.05)
+        if state.fastAttack then
+            activateTool()
+        end
+    end
+end)
+
+task.spawn(function()
+    while _G.__bloxHub == session do
+        task.wait(0.5)
         if flyRig.holdTimer > 0.45 then
             status("voo manual")
         elseif state.autoFarm then
@@ -1157,5 +1347,5 @@ task.spawn(function()
 end)
 
 applyMovement()
-drawEsp()
-print("blox hub carregado v" .. SCRIPT_VERSION)
+refreshEsp()
+print("blox hub v" .. SCRIPT_VERSION .. " carregado")
