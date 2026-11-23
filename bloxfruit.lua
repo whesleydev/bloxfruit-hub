@@ -3,7 +3,7 @@
 -- sem webhook, sem HttpPost.
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/bloxfruit-hub/main"
-local SCRIPT_VERSION = 2
+local SCRIPT_VERSION = 3
 local CONFIG_PATH = "bloxfruit_config.json"
 
 local Players = game:GetService("Players")
@@ -63,6 +63,8 @@ local state = {
     espPlayer = false,
     espMob = false,
     targetName = "auto",
+    moveMode = "rig",
+    autoEquip = true,
 }
 
 local FRUITS = {
@@ -255,7 +257,6 @@ local function updateFly(dt)
     end
 
     local held = UserInputService:IsKeyDown(Enum.KeyCode.Space)
-            or hum.Jump
             or os.clock() < flyRig.pressedUntil
 
     if held then
@@ -294,7 +295,34 @@ local function updateFly(dt)
     end
 end
 
+local function cframeTravel(target, speed)
+    local deadline = os.clock() + 12
+    while os.clock() < deadline do
+        if _G.__bloxHub ~= session then
+            break
+        end
+        local root = rootPart()
+        if not root then
+            break
+        end
+        local delta = target - root.Position
+        if delta.Magnitude < 6 then
+            return true
+        end
+        local dt = RunService.Heartbeat:Wait()
+        if dt > 0.2 then
+            dt = 0.2
+        end
+        local step = math.min(speed * dt, delta.Magnitude)
+        root.CFrame = CFrame.new(root.Position + delta.Unit * step)
+    end
+    return false
+end
+
 local function travelTo(target, speed)
+    if state.moveMode == "cframe" then
+        return cframeTravel(target, speed)
+    end
     local root = rootPart()
     if not root or not target then
         return false
@@ -313,6 +341,8 @@ local function travelTo(target, speed)
     local maxSpeed = math.min(speed, 200)
     local deadline = os.clock() + 12
     local reached = false
+    local watchdog = os.clock()
+    local watchPos = root.Position
 
     while os.clock() < deadline do
         if _G.__bloxHub ~= session then
@@ -343,6 +373,22 @@ local function travelTo(target, speed)
             flyRig.target = flyRig.target + move.Unit * maxSpeed * dt
         end
         flyRig.align.Position = flyRig.target
+
+        if os.clock() - watchdog > 1.2 then
+            local now = rootPart()
+            if now and (now.Position - watchPos).Magnitude < 8 then
+                if owned then
+                    destroyRig()
+                end
+                state.moveMode = "cframe"
+                status("movimento: trocando para CFrame")
+                return cframeTravel(target, speed)
+            end
+            if now then
+                watchPos = now.Position
+            end
+            watchdog = os.clock()
+        end
     end
 
     if owned then
@@ -374,12 +420,15 @@ end
 
 local function aliveRoot(model)
     local hum = model:FindFirstChildOfClass("Humanoid")
+            or model:FindFirstChild("Humanoid", true)
     if not hum or hum.Health <= 0 then
         return nil
     end
     return model:FindFirstChild("HumanoidRootPart")
+            or model:FindFirstChild("HumanoidRootPart", true)
             or model:FindFirstChild("UpperTorso")
             or model:FindFirstChildWhichIsA("BasePart")
+            or model:FindFirstChildWhichIsA("BasePart", true)
 end
 
 local function collectEnemies()
@@ -518,26 +567,26 @@ local function ensureEsp(model, part, color, text)
     local highlight = Instance.new("Highlight")
     highlight.FillTransparency = 1
     highlight.OutlineColor = color
-    highlight.OutlineTransparency = 0
+    highlight.OutlineTransparency = 0.25
     highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     highlight.Adornee = model
     highlight.Parent = espFolder
 
     local billboard = Instance.new("BillboardGui")
-    billboard.Size = UDim2.fromOffset(160, 26)
-    billboard.StudsOffset = Vector3.new(0, 4, 0)
+    billboard.Size = UDim2.fromOffset(130, 20)
+    billboard.StudsOffset = Vector3.new(0, 3.2, 0)
     billboard.AlwaysOnTop = true
-    billboard.MaxDistance = 2000
+    billboard.MaxDistance = 900
     billboard.Adornee = part
     billboard.Parent = espFolder
 
     local label = Instance.new("TextLabel")
     label.Size = UDim2.fromScale(1, 1)
     label.BackgroundTransparency = 1
-    label.Font = Enum.Font.GothamBold
-    label.TextSize = 14
+    label.Font = Enum.Font.Gotham
+    label.TextSize = 12
     label.TextColor3 = color
-    label.TextStrokeTransparency = 0.4
+    label.TextStrokeTransparency = 0.55
     label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
     label.Text = text
     label.Parent = billboard
@@ -590,7 +639,31 @@ local function currentTool()
     return char and char:FindFirstChildOfClass("Tool")
 end
 
+local function equipTool()
+    if not state.autoEquip then
+        return
+    end
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if not char or not backpack then
+        return
+    end
+    if char:FindFirstChildOfClass("Tool") then
+        return
+    end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    for _, tool in ipairs(backpack:GetChildren()) do
+        if tool:IsA("Tool") and hum then
+            pcall(function()
+                hum:EquipTool(tool)
+            end)
+            return
+        end
+    end
+end
+
 local function activateTool()
+    equipTool()
     local tool = currentTool()
     if not tool then
         return false
@@ -1236,6 +1309,37 @@ InfoTab:CreateButton({
 })
 
 InfoTab:CreateButton({
+    Name = "Teste rapido (imprime resultado)",
+    Callback = function()
+        print("=== TESTE RAPIDO ===")
+        print("personagem:", LocalPlayer.Character ~= nil)
+        print("humanoide:", humanoid() ~= nil)
+        print("root:", rootPart() ~= nil)
+        print("ferramenta:", currentTool() and currentTool().Name or "NENHUMA")
+        print("modo movimento:", state.moveMode)
+        local enemies = collectEnemies()
+        print("inimigos:", #enemies)
+        local enemy, distance = pickTarget()
+        if enemy then
+            print("alvo:", enemy.model.Name, math.floor(distance) .. " studs")
+        else
+            print("alvo: nenhum")
+            return
+        end
+        local before = rootPart() and rootPart().Position
+        local built = buildRig()
+        print("rig montado:", built)
+        if built then
+            local ok = travelTo(enemy.part.Position + Vector3.new(0, 3, 0), 150)
+            local after = rootPart() and rootPart().Position
+            local moved = (before and after) and math.floor((after - before).Magnitude) or -1
+            print("chegou:", ok, "| andou:", moved .. " studs")
+            destroyRig()
+        end
+    end,
+})
+
+InfoTab:CreateButton({
     Name = "Listar nomes de mobs (para escolher)",
     Callback = function()
         local enemies = collectEnemies()
@@ -1315,7 +1419,7 @@ end)
 task.spawn(function()
     while _G.__bloxHub == session do
         task.wait(0.5)
-        if flyRig.holdTimer > 0.45 then
+        if flyRig.active and flyRig.holdTimer > 0.45 then
             status("voo manual")
         elseif state.autoFarm then
             farmCycle()
