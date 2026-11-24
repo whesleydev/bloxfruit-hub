@@ -2,7 +2,7 @@
 -- executor: Delta, Xeno, Solara, Fluxus, Wave
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/bloxfruit-hub/main"
-local SCRIPT_VERSION = 11
+local SCRIPT_VERSION = 12
 local CONFIG_PATH = "bloxfruit_config.json"
 
 local Players = game:GetService("Players")
@@ -45,12 +45,12 @@ local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 local state = {
     speed = 16,
     jump = 50,
-    flySpeed = 150,
+    flySpeed = 300,
     fly = false,
     jumpFly = true,
     maxFlyHeight = 300,
     moveMode = "rig",
-    travelSpeed = 150,
+    travelSpeed = 300,
 
     autoFarm = false,
     autoFruit = false,
@@ -75,6 +75,10 @@ local state = {
     espHealth = true,
     espDistance = true,
     espTracer = false,
+    espSkeleton = false,
+    espBox = false,
+    espHeadDot = false,
+    espChams = false,
     espFill = false,
     espOnlySelected = false,
     espRange = 1200,
@@ -85,6 +89,7 @@ local state = {
     colorChest = {60, 220, 120},
     colorMob = {255, 80, 80},
     colorPlayer = {80, 160, 255},
+    colorChams = {255, 120, 200},
 
     verboseLogs = true,
     showLogPanel = false,
@@ -583,6 +588,9 @@ local function collectEnemies()
         if isPlayerCharacter(model) or Players:FindFirstChild(model.Name) then
             return
         end
+        if string.sub(model.Name, 1, 7) == "hubCham" then
+            return
+        end
         local root = aliveRoot(model)
         if root then
             out[#out + 1] = {model = model, part = root}
@@ -670,16 +678,6 @@ local function collectChests()
 end
 
 -- ===== ESP =====
-local function uiRoot()
-    if type(gethui) == "function" then
-        local ok, value = pcall(gethui)
-        if ok and value then
-            return value
-        end
-    end
-    return game:GetService("CoreGui")
-end
-
 local espFolder = Instance.new("Folder")
 espFolder.Name = "BloxEsp"
 pcall(function()
@@ -687,8 +685,59 @@ pcall(function()
 end)
 session.espFolder = espFolder
 
+local chamsFolder = Instance.new("Folder")
+chamsFolder.Name = "hubChams"
+pcall(function()
+    chamsFolder.Parent = Workspace
+end)
+
 local espItems = {}
 local tracers = {}
+local chams = {}
+local drawLines = {}
+
+local function line(key, thickness)
+    if not Drawing then
+        return nil
+    end
+    local object = drawLines[key]
+    if not object then
+        object = Drawing.new("Line")
+        object.Thickness = thickness or 1
+        object.Transparency = 0.9
+        object.Visible = false
+        drawLines[key] = object
+    end
+    return object
+end
+
+local function hidePrefix(prefix)
+    for key, object in pairs(drawLines) do
+        if string.sub(key, 1, #prefix) == prefix then
+            pcall(function()
+                object.Visible = false
+            end)
+        end
+    end
+end
+
+local SKELETON = {
+    R15 = {
+        {"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+        {"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"},
+        {"LeftLowerArm", "LeftHand"},
+        {"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"},
+        {"RightLowerArm", "RightHand"},
+        {"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"},
+        {"LeftLowerLeg", "LeftFoot"},
+        {"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"},
+        {"RightLowerLeg", "RightFoot"},
+    },
+    R6 = {
+        {"Head", "Torso"}, {"Torso", "Left Arm"}, {"Torso", "Right Arm"},
+        {"Torso", "Left Leg"}, {"Torso", "Right Leg"},
+    },
+}
 
 local function removeEsp(model)
     local item = espItems[model]
@@ -702,10 +751,10 @@ local function removeEsp(model)
         end
         espItems[model] = nil
     end
-    local line = tracers[model]
-    if line then
+    local tracer = tracers[model]
+    if tracer then
         pcall(function()
-            line:Remove()
+            tracer:Remove()
         end)
         tracers[model] = nil
     end
@@ -718,7 +767,7 @@ local function ensureEsp(model, part, color, title)
     end
 
     local highlight = Instance.new("Highlight")
-    highlight.FillTransparency = state.espFill and 0.65 or 1
+    highlight.FillTransparency = state.espFill and 0.6 or 1
     highlight.FillColor = color
     highlight.OutlineColor = color
     highlight.OutlineTransparency = 0.25
@@ -763,13 +812,161 @@ local function ensureEsp(model, part, color, title)
     espItems[model] = item
 
     if state.espTracer and Drawing then
-        local line = Drawing.new("Line")
-        line.Thickness = 1
-        line.Color = color
-        line.Transparency = 0.6
-        tracers[model] = line
+        local tracer = Drawing.new("Line")
+        tracer.Thickness = 1
+        tracer.Color = color
+        tracer.Transparency = 0.6
+        tracers[model] = tracer
     end
     return item
+end
+
+local function updateSkeleton(model, key, color)
+    local camera = Workspace.CurrentCamera
+    if not camera then
+        return
+    end
+    local rig = model:FindFirstChild("UpperTorso") and "R15" or "R6"
+    local joints = SKELETON[rig]
+    if not joints then
+        return
+    end
+    for index, pair in ipairs(joints) do
+        local a = model:FindFirstChild(pair[1], true)
+        local b = model:FindFirstChild(pair[2], true)
+        if a and b and a:IsA("BasePart") and b:IsA("BasePart") then
+            local object = line(key .. "_sk" .. index, 1)
+            if object then
+                local pa, onA = camera:WorldToViewportPoint(a.Position)
+                local pb, onB = camera:WorldToViewportPoint(b.Position)
+                if onA and onB then
+                    object.From = Vector2.new(pa.X, pa.Y)
+                    object.To = Vector2.new(pb.X, pb.Y)
+                    object.Color = color
+                    object.Visible = true
+                else
+                    object.Visible = false
+                end
+            end
+        end
+    end
+end
+
+local function updateBox(model, key, color)
+    local camera = Workspace.CurrentCamera
+    if not camera then
+        return
+    end
+    local ok, cf, size = pcall(function()
+        local c, s = model:GetBoundingBox()
+        return c, s
+    end)
+    if not ok or not cf then
+        hidePrefix(key .. "_box")
+        return
+    end
+
+    local minX, minY = math.huge, math.huge
+    local maxX, maxY = -math.huge, -math.huge
+    local visible = false
+
+    for _, sx in ipairs({-0.5, 0.5}) do
+        for _, sy in ipairs({-0.5, 0.5}) do
+            for _, sz in ipairs({-0.5, 0.5}) do
+                local world = cf * Vector3.new(size.X * sx, size.Y * sy, size.Z * sz)
+                local point, onScreen = camera:WorldToViewportPoint(world)
+                if onScreen then
+                    visible = true
+                    minX = math.min(minX, point.X)
+                    minY = math.min(minY, point.Y)
+                    maxX = math.max(maxX, point.X)
+                    maxY = math.max(maxY, point.Y)
+                end
+            end
+        end
+    end
+
+    if not visible then
+        hidePrefix(key .. "_box")
+        return
+    end
+
+    local corners = {
+        {Vector2.new(minX, minY), Vector2.new(maxX, minY)},
+        {Vector2.new(maxX, minY), Vector2.new(maxX, maxY)},
+        {Vector2.new(maxX, maxY), Vector2.new(minX, maxY)},
+        {Vector2.new(minX, maxY), Vector2.new(minX, minY)},
+    }
+    for index, pair in ipairs(corners) do
+        local object = line(key .. "_box" .. index, 1)
+        if object then
+            object.From = pair[1]
+            object.To = pair[2]
+            object.Color = color
+            object.Visible = true
+        end
+    end
+end
+
+local function updateChams(character, color, key)
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not root then
+        return
+    end
+    local entry = chams[key]
+    if not entry or not entry.model or not entry.model.Parent then
+        local clone = character:Clone()
+        for _, object in ipairs(clone:GetDescendants()) do
+            if object:IsA("Script") or object:IsA("LocalScript") then
+                object:Destroy()
+            elseif object:IsA("BasePart") then
+                object.Anchored = true
+                object.CanCollide = false
+                object.CanQuery = false
+                object.CanTouch = false
+                object.Transparency = 0.5
+                object.Material = Enum.Material.SmoothPlastic
+                object.Color = color
+            elseif object:IsA("Decal") or object:IsA("Texture") then
+                object.Transparency = 1
+            end
+        end
+        clone.Name = "hubCham_" .. key
+        clone.Parent = chamsFolder
+
+        local highlight = Instance.new("Highlight")
+        highlight.FillColor = color
+        highlight.FillTransparency = 0.65
+        highlight.OutlineColor = color
+        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        highlight.Adornee = clone
+        highlight.Parent = chamsFolder
+
+        entry = {model = clone, highlight = highlight}
+        chams[key] = entry
+    end
+
+    local primary = entry.model.PrimaryPart or entry.model:FindFirstChild("HumanoidRootPart")
+    if primary then
+        entry.model.PrimaryPart = primary
+        pcall(function()
+            entry.model:PivotTo(root.CFrame)
+        end)
+    end
+end
+
+local function clearChams()
+    for key, entry in pairs(chams) do
+        pcall(function()
+            if entry.model then
+                entry.model:Destroy()
+            end
+            if entry.highlight then
+                entry.highlight:Destroy()
+            end
+        end)
+        chams[key] = nil
+    end
 end
 
 local function screenPoint(part)
@@ -798,6 +995,7 @@ local function refreshEsp()
         if distance > state.espRange then
             item.billboard.Enabled = false
             item.highlight.Enabled = false
+            hidePrefix(tostring(entry.model))
             return
         end
         item.highlight.Enabled = true
@@ -821,20 +1019,51 @@ local function refreshEsp()
                     90 + 130 * ratio, 90)
         end
 
-        local line = tracers[entry.model]
-        if line then
+        local key = tostring(entry.model)
+        if state.espSkeleton then
+            updateSkeleton(entry.model, key, color)
+        else
+            hidePrefix(key .. "_sk")
+        end
+        if state.espBox then
+            updateBox(entry.model, key, color)
+        else
+            hidePrefix(key .. "_box")
+        end
+        if state.espHeadDot then
+            local head = entry.model:FindFirstChild("Head")
+            if head then
+                local dot = line(key .. "_head", 3)
+                local point = screenPoint(head)
+                if dot then
+                    if point then
+                        dot.From = point
+                        dot.To = point + Vector2.new(0, 1)
+                        dot.Color = color
+                        dot.Visible = true
+                    else
+                        dot.Visible = false
+                    end
+                end
+            end
+        else
+            hidePrefix(key .. "_head")
+        end
+
+        local tracer = tracers[entry.model]
+        if tracer then
             if state.espTracer then
                 local point = screenPoint(entry.part)
-                if point then
-                    line.From = Vector2.new(Workspace.CurrentCamera.ViewportSize.X / 2,
-                            Workspace.CurrentCamera.ViewportSize.Y)
-                    line.To = point
-                    line.Visible = true
+                local camera = Workspace.CurrentCamera
+                if point and camera then
+                    tracer.From = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y)
+                    tracer.To = point
+                    tracer.Visible = true
                 else
-                    line.Visible = false
+                    tracer.Visible = false
                 end
             else
-                line.Visible = false
+                tracer.Visible = false
             end
         end
     end
@@ -865,6 +1094,9 @@ local function refreshEsp()
                 if root and (not state.espOnlySelected or player.Name == state.selectedPlayer) then
                     handle({model = player.Character, part = root},
                             rgb(state.colorPlayer), player.Name)
+                    if state.espChams then
+                        updateChams(player.Character, rgb(state.colorChams), player.Name)
+                    end
                 end
             end
         end
@@ -877,15 +1109,32 @@ local function refreshEsp()
     end
     for model in pairs(tracers) do
         if not active[model] then
-            local line = tracers[model]
+            local tracer = tracers[model]
             pcall(function()
-                line:Remove()
+                tracer:Remove()
             end)
             tracers[model] = nil
         end
     end
+    if not state.espChams then
+        clearChams()
+    else
+        for name, entry in pairs(chams) do
+            local player = Players:FindFirstChild(name)
+            if not player or not player.Character or not state.espPlayer then
+                pcall(function()
+                    if entry.model then
+                        entry.model:Destroy()
+                    end
+                    if entry.highlight then
+                        entry.highlight:Destroy()
+                    end
+                end)
+                chams[name] = nil
+            end
+        end
+    end
 end
-
 
 -- ===== combate =====
 local function currentTool()
@@ -1348,20 +1597,9 @@ end
 
 -- hitbox
 local hitboxOriginal = {}
+local hitboxParts = {}
 
 local function applyHitbox()
-    for _, enemy in ipairs(collectEnemies()) do
-        local part = enemy.part
-        if state.hitbox then
-            if not hitboxOriginal[part] then
-                hitboxOriginal[part] = {size = part.Size, transparency = part.Transparency,
-                                        collide = part.CanCollide}
-            end
-            part.Size = Vector3.new(state.hitboxSize, state.hitboxSize, state.hitboxSize)
-            part.Transparency = 0.75
-            part.CanCollide = false
-        end
-    end
     if not state.hitbox then
         for part, original in pairs(hitboxOriginal) do
             pcall(function()
@@ -1371,6 +1609,50 @@ local function applyHitbox()
             end)
         end
         hitboxOriginal = {}
+        for _, extra in pairs(hitboxParts) do
+            pcall(function()
+                extra:Destroy()
+            end)
+        end
+        hitboxParts = {}
+        return
+    end
+
+    for _, enemy in ipairs(collectEnemies()) do
+        local root = enemy.part
+        for _, part in ipairs(enemy.model:GetDescendants()) do
+            if part:IsA("BasePart")
+                    and (part.Name == "HumanoidRootPart" or part.Name == "Torso"
+                    or part.Name == "UpperTorso" or part.Name == "LowerTorso"
+                    or part.Name == "Head") then
+                if not hitboxOriginal[part] then
+                    hitboxOriginal[part] = {size = part.Size,
+                                            transparency = part.Transparency,
+                                            collide = part.CanCollide}
+                end
+                part.Size = Vector3.new(state.hitboxSize, state.hitboxSize, state.hitboxSize)
+                part.Transparency = 0.85
+                part.CanCollide = false
+            end
+        end
+
+        if not hitboxParts[enemy.model] and root then
+            local box = Instance.new("Part")
+            box.Name = "hubHitbox"
+            box.Size = Vector3.new(state.hitboxSize, state.hitboxSize, state.hitboxSize)
+            box.Transparency = 1
+            box.CanCollide = false
+            box.CanQuery = true
+            box.CanTouch = true
+            box.Massless = true
+            box.Parent = enemy.model
+            box.CFrame = root.CFrame
+            local weld = Instance.new("WeldConstraint")
+            weld.Part0 = root
+            weld.Part1 = box
+            weld.Parent = box
+            hitboxParts[enemy.model] = box
+        end
     end
 end
 
@@ -1993,7 +2275,7 @@ FarmTab:CreateToggle({
 
 FarmTab:CreateSlider({
     Name = "Intervalo de ataque",
-    Range = {0.02, 0.5},
+    Range = {0.01, 0.5},
     Increment = 0.01,
     Suffix = "s",
     CurrentValue = state.attackDelay,
@@ -2107,8 +2389,8 @@ MoveTab:CreateToggle({
 
 MoveTab:CreateSlider({
     Name = "Velocidade do voo",
-    Range = {20, 500},
-    Increment = 10,
+    Range = {20, 1200},
+    Increment = 20,
     Suffix = "studs/s",
     CurrentValue = state.flySpeed,
     Callback = function(value)
@@ -2395,6 +2677,53 @@ EspTab:CreateColorPicker({
     end,
 })
 
+EspTab:CreateToggle({
+    Name = "ESP 3D (boneco atras da parede)",
+    CurrentValue = false,
+    Callback = function(value)
+        state.espChams = value
+        if not value then
+            clearChams()
+        end
+        Log.add("INFO", "esp chams = " .. tostring(value))
+    end,
+})
+
+EspTab:CreateToggle({
+    Name = "ESP esqueleto",
+    CurrentValue = false,
+    Callback = function(value)
+        state.espSkeleton = value
+        Log.add("INFO", "esp esqueleto = " .. tostring(value))
+    end,
+})
+
+EspTab:CreateToggle({
+    Name = "ESP caixa (box)",
+    CurrentValue = false,
+    Callback = function(value)
+        state.espBox = value
+    end,
+})
+
+EspTab:CreateToggle({
+    Name = "Ponto na cabeca",
+    CurrentValue = false,
+    Callback = function(value)
+        state.espHeadDot = value
+    end,
+})
+
+EspTab:CreateColorPicker({
+    Name = "Cor: ESP 3D",
+    Color = Color3.fromRGB(255, 120, 200),
+    Callback = function(color)
+        state.colorChams = {math.floor(color.R * 255), math.floor(color.G * 255),
+                            math.floor(color.B * 255)}
+        clearChams()
+    end,
+})
+
 EspTab:CreateButton({
     Name = "Limpar ESP",
     Callback = function()
@@ -2464,8 +2793,8 @@ TpTab:CreateButton({
 
 TpTab:CreateSlider({
     Name = "Velocidade do deslocamento",
-    Range = {50, 400},
-    Increment = 10,
+    Range = {50, 1200},
+    Increment = 25,
     Suffix = "studs/s",
     CurrentValue = state.travelSpeed,
     Callback = function(value)
@@ -2980,7 +3309,7 @@ task.spawn(function()
         refreshEsp()
         applyMovement()
         if state.hitbox then
-            applyHitbox()
+            pcall(applyHitbox)
         end
         if state.noClip then
             local char = LocalPlayer.Character
@@ -2998,13 +3327,18 @@ task.spawn(function()
     end
 end)
 
-task.spawn(function()
-    while _G.__bloxHub == session do
-        task.wait(0.05)
-        if state.fastAttack then
-            activateTool()
-        end
+local lastAttack = 0
+
+session.connections[#session.connections + 1] = RunService.RenderStepped:Connect(function()
+    if not state.fastAttack then
+        return
     end
+    local now = os.clock()
+    if now - lastAttack < state.attackDelay then
+        return
+    end
+    lastAttack = now
+    activateTool()
 end)
 
 task.spawn(function()
@@ -3028,7 +3362,7 @@ local lastCycleAt = os.clock()
 
 task.spawn(function()
     while _G.__bloxHub == session do
-        task.wait(0.5)
+        task.wait(0.15)
         if os.clock() - lastCycleAt > 30 then
             lastCycleAt = os.clock()
             Log.add("AVISO", "loop parado ha 30s (nenhum ciclo concluido)")
