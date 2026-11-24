@@ -2,7 +2,7 @@
 -- executor: Delta, Xeno, Solara, Fluxus, Wave
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/bloxfruit-hub/main"
-local SCRIPT_VERSION = 6
+local SCRIPT_VERSION = 7
 local CONFIG_PATH = "bloxfruit_config.json"
 
 local Players = game:GetService("Players")
@@ -67,6 +67,8 @@ local state = {
     hitboxSize = 14,
     questName = "",
     questLevel = 1,
+    questSeconds = 45,
+    autoQuestFly = false,
 
     espFruit = true,
     espChest = true,
@@ -828,6 +830,7 @@ local function refreshEsp()
     end
 end
 
+
 -- ===== combate =====
 local function currentTool()
     local char = LocalPlayer.Character
@@ -958,6 +961,124 @@ local function farmCycle()
         activateTool()
         task.wait(state.attackDelay)
     end
+
+    if owned then
+        destroyRig()
+    end
+    return true
+end
+
+-- ===== missoes =====
+local function playerLevel()
+    local ok, value = pcall(function()
+        return LocalPlayer.Data.Level.Value
+    end)
+    if ok and type(value) == "number" then
+        return value
+    end
+    return 1
+end
+
+local function collectQuestPrompts()
+    local out = {}
+    for _, object in ipairs(Workspace:GetDescendants()) do
+        if object:IsA("ProximityPrompt") then
+            local action = string.lower(object.ActionText or "")
+            local label = string.lower(object.ObjectText or "")
+            local text = action .. " " .. label
+            if string.find(text, "quest", 1, true)
+                    or string.find(text, "miss", 1, true)
+                    or string.find(action, "talk", 1, true) then
+                local parent = object.Parent
+                local part = parent and (parent:IsA("BasePart") and parent
+                        or parent:FindFirstChildWhichIsA("BasePart"))
+                if part then
+                    out[#out + 1] = {
+                        prompt = object,
+                        part = part,
+                        action = object.ActionText or "",
+                        label = object.ObjectText or "",
+                        path = part:GetFullName(),
+                    }
+                end
+            end
+        end
+    end
+    return out
+end
+
+local function nearestQuest()
+    local mine = rootPart()
+    if not mine then
+        return nil, math.huge
+    end
+    local best, bestDistance = nil, math.huge
+    for _, entry in ipairs(collectQuestPrompts()) do
+        local distance = (entry.part.Position - mine.Position).Magnitude
+        if distance < bestDistance then
+            best, bestDistance = entry, distance
+        end
+    end
+    return best, bestDistance
+end
+
+local function questCycle()
+    local level = playerLevel()
+    local entry, distance = nearestQuest()
+    Log.add("INFO", string.format("missao: nivel %d | prompts %d", level, #collectQuestPrompts()))
+    if not entry then
+        status("missao: nenhum NPC encontrado")
+        return false
+    end
+    status(string.format("missao: NPC a %d studs", math.floor(distance)))
+    Log.add("ACAO", string.format("missao: indo ao NPC %s (%s)", entry.path, entry.label))
+
+    local owned = false
+    if not flyRig.active then
+        if not buildRig() then
+            return false
+        end
+        owned = true
+    end
+
+    travelTo(entry.part.Position + Vector3.new(0, 3, 0), state.travelSpeed)
+
+    local fired = pcall(function()
+        fireproximityprompt(entry.prompt)
+    end)
+    Log.add(fired and "ACAO" or "ERRO", "missao: prompt disparado = " .. tostring(fired))
+    task.wait(1.5)
+
+    local deadline = os.clock() + state.questSeconds
+    local killed = 0
+    while os.clock() < deadline and _G.__bloxHub == session do
+        local enemy = pickTarget()
+        if enemy then
+            local mine = rootPart()
+            if mine and (enemy.part.Position - mine.Position).Magnitude > 18 then
+                travelTo(enemy.part.Position + Vector3.new(0, 3, 0), state.flySpeed)
+            end
+            local attackUntil = os.clock() + 2
+            while os.clock() < attackUntil do
+                if not aliveRoot(enemy.model) then
+                    killed = killed + 1
+                    break
+                end
+                activateTool()
+                task.wait(state.attackDelay)
+            end
+        else
+            task.wait(0.4)
+        end
+    end
+
+    Log.add("ACAO", "missao: " .. killed .. " mortes no ciclo")
+
+    travelTo(entry.part.Position + Vector3.new(0, 3, 0), state.travelSpeed)
+    pcall(function()
+        fireproximityprompt(entry.prompt)
+    end)
+    Log.add("ACAO", "missao: tentativa de entrega")
 
     if owned then
         destroyRig()
@@ -1758,6 +1879,54 @@ FarmTab:CreateToggle({
     CurrentValue = false,
     Callback = function(value)
         state.autoQuest = value
+    end,
+})
+
+FarmTab:CreateToggle({
+    Name = "Auto missao voando + farm",
+    CurrentValue = false,
+    Callback = function(value)
+        state.autoQuestFly = value
+        Log.add("INFO", "auto missao voando = " .. tostring(value))
+    end,
+})
+
+FarmTab:CreateSlider({
+    Name = "Segundos farmando por missao",
+    Range = {10, 180},
+    Increment = 5,
+    Suffix = "s",
+    CurrentValue = state.questSeconds,
+    Callback = function(value)
+        state.questSeconds = value
+        markDirty()
+    end,
+})
+
+FarmTab:CreateButton({
+    Name = "Ir para missao agora",
+    Callback = function()
+        task.spawn(function()
+            local ok, err = pcall(questCycle)
+            if not ok then
+                Log.add("ERRO", "questCycle: " .. tostring(err))
+            end
+        end)
+    end,
+})
+
+FarmTab:CreateButton({
+    Name = "Listar NPCs de missao",
+    Callback = function()
+        local mine = rootPart()
+        local entries = collectQuestPrompts()
+        Log.add("INFO", "prompts de missao encontrados: " .. #entries)
+        for _, entry in ipairs(entries) do
+            local distance = mine and math.floor((entry.part.Position - mine.Position).Magnitude) or -1
+            Log.add("INFO", string.format("  %s | action='%s' label='%s' | %d studs",
+                    entry.path, entry.action, entry.label, distance))
+        end
+        setLogPanel(true)
     end,
 })
 
@@ -2613,6 +2782,11 @@ task.spawn(function()
         task.wait(0.5)
         if flyRig.active and flyRig.holdTimer > 0.45 then
             status("voo manual")
+        elseif state.autoQuestFly then
+            local ok, err = pcall(questCycle)
+            if not ok then
+                Log.add("ERRO", "questCycle: " .. tostring(err))
+            end
         elseif state.autoFarm then
             local ok, err = pcall(farmCycle)
             if not ok then
