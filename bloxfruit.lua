@@ -2,7 +2,7 @@
 -- executor: Delta, Xeno, Solara, Fluxus, Wave
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/bloxfruit-hub/main"
-local SCRIPT_VERSION = 4
+local SCRIPT_VERSION = 5
 local CONFIG_PATH = "bloxfruit_config.json"
 
 local Players = game:GetService("Players")
@@ -76,7 +76,15 @@ local state = {
     espHealth = true,
     espDistance = true,
     espTracer = false,
+    espFill = false,
+    espOnlySelected = false,
     espRange = 1200,
+    selectedPlayer = nil,
+    spectate = false,
+    colorFruit = {255, 200, 60},
+    colorChest = {60, 220, 120},
+    colorMob = {255, 80, 80},
+    colorPlayer = {80, 160, 255},
 
     antiAfk = true,
     noClip = false,
@@ -587,7 +595,8 @@ local function ensureEsp(model, part, color, title)
     end
 
     local highlight = Instance.new("Highlight")
-    highlight.FillTransparency = 1
+    highlight.FillTransparency = state.espFill and 0.65 or 1
+    highlight.FillColor = color
     highlight.OutlineColor = color
     highlight.OutlineTransparency = 0.25
     highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
@@ -707,28 +716,32 @@ local function refreshEsp()
         end
     end
 
+    local function rgb(t)
+        return Color3.fromRGB(t[1], t[2], t[3])
+    end
+
     if state.espFruit then
         for _, fruit in ipairs(collectFruits()) do
-            handle(fruit, Color3.fromRGB(255, 200, 60), fruit.model.Name)
+            handle(fruit, rgb(state.colorFruit), fruit.model.Name)
         end
     end
     if state.espChest then
         for _, chest in ipairs(collectChests()) do
-            handle(chest, Color3.fromRGB(60, 220, 120), "bau")
+            handle(chest, rgb(state.colorChest), "bau")
         end
     end
     if state.espMob then
         for _, enemy in ipairs(collectEnemies()) do
-            handle(enemy, Color3.fromRGB(255, 80, 80), enemy.model.Name)
+            handle(enemy, rgb(state.colorMob), enemy.model.Name)
         end
     end
     if state.espPlayer then
         for _, player in ipairs(Players:GetPlayers()) do
             if player ~= LocalPlayer and player.Character then
                 local root = player.Character:FindFirstChild("HumanoidRootPart")
-                if root then
+                if root and (not state.espOnlySelected or player.Name == state.selectedPlayer) then
                     handle({model = player.Character, part = root},
-                            Color3.fromRGB(80, 160, 255), player.Name)
+                            rgb(state.colorPlayer), player.Name)
                 end
             end
         end
@@ -774,6 +787,41 @@ local function equipTool()
             return
         end
     end
+end
+
+local function serverTouch(part)
+    local hrp = rootPart()
+    if not hrp or not part then
+        return false
+    end
+    local ok = pcall(function()
+        firetouchinterest(part, hrp, 0)
+        task.wait(0.05)
+        firetouchinterest(part, hrp, 1)
+    end)
+    return ok
+end
+
+local function serverPrompts(radius)
+    local hrp = rootPart()
+    if not hrp then
+        return 0
+    end
+    local fired = 0
+    for _, object in ipairs(Workspace:GetDescendants()) do
+        if object:IsA("ProximityPrompt") and object.Enabled then
+            local parent = object.Parent
+            local part = parent and (parent:IsA("BasePart") and parent
+                    or parent:FindFirstChildWhichIsA("BasePart"))
+            if part and (part.Position - hrp.Position).Magnitude <= radius then
+                pcall(function()
+                    fireproximityprompt(object)
+                end)
+                fired = fired + 1
+            end
+        end
+    end
+    return fired
 end
 
 local function activateTool()
@@ -867,7 +915,9 @@ local function fruitCycle()
     end
     local ok = travelTo(fruit.part.Position + Vector3.new(0, 3, 0), state.travelSpeed)
     if ok then
-        touchSweep(1.0)
+        touchSweep(0.6)
+        serverTouch(fruit.part)
+        serverPrompts(20)
     end
     if owned then
         destroyRig()
@@ -893,7 +943,9 @@ local function chestCycle()
     end
     local ok = travelTo(chest.part.Position + Vector3.new(0, 3, 0), state.travelSpeed)
     if ok then
-        touchSweep(0.8)
+        touchSweep(0.5)
+        serverTouch(chest.part)
+        serverPrompts(25)
     end
     if owned then
         destroyRig()
@@ -979,6 +1031,155 @@ local function makeGui(name, order)
     end
     return gui
 end
+
+
+-- ===== preview 3D do jogador =====
+local previewGui = makeGui("BloxPreview", 999997)
+previewGui.Enabled = false
+
+local previewFrame = Instance.new("Frame")
+previewFrame.Size = UDim2.fromOffset(260, 320)
+previewFrame.Position = UDim2.new(1, -290, 0, 120)
+previewFrame.BackgroundColor3 = Color3.fromRGB(14, 17, 23)
+previewFrame.BorderSizePixel = 0
+previewFrame.Active = true
+previewFrame.Parent = previewGui
+
+local previewCorner = Instance.new("UICorner")
+previewCorner.CornerRadius = UDim.new(0, 12)
+previewCorner.Parent = previewFrame
+
+local previewStroke = Instance.new("UIStroke")
+previewStroke.Color = Color3.fromRGB(220, 130, 40)
+previewStroke.Thickness = 2
+previewStroke.Transparency = 0.3
+previewStroke.Parent = previewFrame
+
+local previewTitle = Instance.new("TextLabel")
+previewTitle.Size = UDim2.new(1, -40, 0, 30)
+previewTitle.Position = UDim2.fromOffset(12, 6)
+previewTitle.BackgroundTransparency = 1
+previewTitle.Font = Enum.Font.GothamBold
+previewTitle.TextSize = 14
+previewTitle.TextColor3 = Color3.fromRGB(255, 190, 120)
+previewTitle.TextXAlignment = Enum.TextXAlignment.Left
+previewTitle.Text = "preview"
+previewTitle.Parent = previewFrame
+
+local previewClose = Instance.new("TextButton")
+previewClose.Size = UDim2.fromOffset(26, 26)
+previewClose.Position = UDim2.new(1, -34, 0, 6)
+previewClose.BackgroundColor3 = Color3.fromRGB(40, 30, 30)
+previewClose.Text = "x"
+previewClose.TextColor3 = Color3.fromRGB(255, 120, 120)
+previewClose.Font = Enum.Font.GothamBold
+previewClose.TextSize = 14
+previewClose.BorderSizePixel = 0
+previewClose.Parent = previewFrame
+
+local previewCorner2 = Instance.new("UICorner")
+previewCorner2.CornerRadius = UDim.new(0, 8)
+previewCorner2.Parent = previewClose
+
+local viewport = Instance.new("ViewportFrame")
+viewport.Size = UDim2.new(1, -20, 1, -50)
+viewport.Position = UDim2.fromOffset(10, 40)
+viewport.BackgroundColor3 = Color3.fromRGB(20, 24, 32)
+viewport.BorderSizePixel = 0
+viewport.Ambient = Color3.fromRGB(200, 200, 200)
+viewport.LightColor = Color3.fromRGB(255, 255, 255)
+viewport.Parent = previewFrame
+
+local viewportCorner = Instance.new("UICorner")
+viewportCorner.CornerRadius = UDim.new(0, 10)
+viewportCorner.Parent = viewport
+
+local world = Instance.new("WorldModel")
+world.Parent = viewport
+
+local previewCamera = Instance.new("Camera")
+previewCamera.CFrame = CFrame.new(Vector3.new(0, 3, -12), Vector3.new(0, 3, 0))
+previewCamera.Parent = viewport
+viewport.CurrentCamera = previewCamera
+
+local previewAngle = 0
+local previewTarget = nil
+local previewPlayer = nil
+
+local function hidePreview()
+    previewGui.Enabled = false
+    previewPlayer = nil
+    world:ClearAllChildren()
+end
+
+previewClose.MouseButton1Click:Connect(hidePreview)
+
+local function showPreview(player)
+    if not player or not player.Character then
+        return false
+    end
+    local clone = player.Character:Clone()
+    if not clone then
+        return false
+    end
+    for _, object in ipairs(clone:GetDescendants()) do
+        if object:IsA("Script") or object:IsA("LocalScript") then
+            object:Destroy()
+        end
+    end
+    world:ClearAllChildren()
+    clone.Parent = world
+    previewPlayer = player
+    previewTitle.Text = player.Name
+    previewGui.Enabled = true
+    return true
+end
+
+local function updatePreview(dt)
+    if not previewGui.Enabled or not previewPlayer then
+        return
+    end
+    previewAngle = previewAngle + dt * 0.7
+    local radius = 13
+    previewCamera.CFrame = CFrame.new(
+            Vector3.new(math.sin(previewAngle) * radius, 4, math.cos(previewAngle) * radius),
+            Vector3.new(0, 2.5, 0))
+end
+
+local previewDrag = false
+local previewStart = nil
+local previewOrigin = nil
+
+previewFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+        previewDrag = true
+        previewStart = input.Position
+        previewOrigin = previewFrame.Position
+    end
+end)
+
+session.connections[#session.connections + 1] = UserInputService.InputChanged:Connect(function(input)
+    if not previewDrag then
+        return
+    end
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch then
+        local delta = input.Position - previewStart
+        previewFrame.Position = UDim2.new(previewOrigin.X.Scale, previewOrigin.X.Offset + delta.X,
+                previewOrigin.Y.Scale, previewOrigin.Y.Offset + delta.Y)
+    end
+end)
+
+session.connections[#session.connections + 1] = UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+        previewDrag = false
+    end
+end)
+
+session.showPreview = showPreview
+session.hidePreview = hidePreview
 
 local bubbleGui = makeGui("BloxBubble", 999999)
 
@@ -1530,6 +1731,133 @@ EspTab:CreateSlider({
     end,
 })
 
+local function resetEspVisuals()
+    for model in pairs(espItems) do
+        removeEsp(model)
+    end
+    refreshEsp()
+end
+
+local playerDropdown = nil
+
+playerDropdown = EspTab:CreateDropdown({
+    Name = "Jogador (lista)",
+    Options = {"(vazio)"},
+    CurrentOption = {"(vazio)"},
+    MultipleOptions = false,
+    Callback = function(option)
+        local name = type(option) == "table" and option[1] or option
+        if name and name ~= "(vazio)" then
+            state.selectedPlayer = name
+        end
+    end,
+})
+
+EspTab:CreateButton({
+    Name = "Ver jogador em 3D",
+    Callback = function()
+        local name = state.selectedPlayer
+        local player = name and Players:FindFirstChild(name)
+        if not player then
+            Rayfield:Notify({Title = "Preview", Content = "Escolhe um jogador na lista.", Duration = 4})
+            return
+        end
+        if session.showPreview and session.showPreview(player) then
+            Rayfield:Notify({Title = "Preview", Content = player.Name .. " em 3D.", Duration = 3})
+        else
+            Rayfield:Notify({Title = "Preview", Content = "Jogador sem personagem.", Duration = 4})
+        end
+    end,
+})
+
+EspTab:CreateButton({
+    Name = "Atualizar lista de jogadores",
+    Callback = function()
+        local names = {}
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                names[#names + 1] = player.Name
+            end
+        end
+        if #names == 0 then
+            names = {"(vazio)"}
+        end
+        if playerDropdown then
+            playerDropdown:Refresh(names)
+        end
+        Rayfield:Notify({Title = "Lista", Content = #names .. " jogador(es).", Duration = 3})
+    end,
+})
+
+EspTab:CreateToggle({
+    Name = "Espectar jogador selecionado",
+    CurrentValue = false,
+    Callback = function(value)
+        state.spectate = value
+        if not value then
+            local camera = Workspace.CurrentCamera
+            local hum = humanoid()
+            if camera and hum then
+                camera.CameraSubject = hum
+            end
+        end
+    end,
+})
+
+EspTab:CreateToggle({
+    Name = "ESP so do jogador selecionado",
+    CurrentValue = false,
+    Callback = function(value)
+        state.espOnlySelected = value
+        resetEspVisuals()
+    end,
+})
+
+EspTab:CreateToggle({
+    Name = "Preenchimento (fill)",
+    CurrentValue = state.espFill,
+    Callback = function(value)
+        state.espFill = value
+        resetEspVisuals()
+    end,
+})
+
+EspTab:CreateColorPicker({
+    Name = "Cor: jogadores",
+    Color = Color3.fromRGB(80, 160, 255),
+    Callback = function(color)
+        state.colorPlayer = {math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255)}
+        resetEspVisuals()
+    end,
+})
+
+EspTab:CreateColorPicker({
+    Name = "Cor: mobs",
+    Color = Color3.fromRGB(255, 80, 80),
+    Callback = function(color)
+        state.colorMob = {math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255)}
+        resetEspVisuals()
+    end,
+})
+
+EspTab:CreateColorPicker({
+    Name = "Cor: frutas",
+    Color = Color3.fromRGB(255, 200, 60),
+    Callback = function(color)
+        state.colorFruit = {math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255)}
+        resetEspVisuals()
+    end,
+})
+
+EspTab:CreateColorPicker({
+    Name = "Cor: baus",
+    Color = Color3.fromRGB(60, 220, 120),
+    Callback = function(color)
+        state.colorChest = {math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255)}
+        resetEspVisuals()
+    end,
+})
+
 EspTab:CreateButton({
     Name = "Limpar ESP",
     Callback = function()
@@ -1878,6 +2206,15 @@ InfoTab:CreateButton({
 -- ===== loops =====
 session.connections[#session.connections + 1] = RunService.Heartbeat:Connect(function(dt)
     updateFly(dt)
+    updatePreview(dt)
+    if state.spectate and state.selectedPlayer then
+        local player = Players:FindFirstChild(state.selectedPlayer)
+        local hum = player and player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+        local camera = Workspace.CurrentCamera
+        if hum and camera and camera.CameraSubject ~= hum then
+            camera.CameraSubject = hum
+        end
+    end
 end)
 
 LocalPlayer.CharacterAdded:Connect(function()
@@ -1979,6 +2316,25 @@ task.spawn(function()
                 vu:CaptureController()
                 vu:ClickButton2(Vector2.new())
             end)
+        end
+    end
+end)
+
+task.spawn(function()
+    while _G.__bloxHub == session do
+        task.wait(6)
+        if playerDropdown then
+            local names = {}
+            for _, player in ipairs(Players:GetPlayers()) do
+                if player ~= LocalPlayer then
+                    names[#names + 1] = player.Name
+                end
+            end
+            if #names > 0 then
+                pcall(function()
+                    playerDropdown:Refresh(names)
+                end)
+            end
         end
     end
 end)
