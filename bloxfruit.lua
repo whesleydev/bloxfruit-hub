@@ -2,7 +2,7 @@
 -- executor: Delta, Xeno, Solara, Fluxus, Wave
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/bloxfruit-hub/main"
-local SCRIPT_VERSION = 7
+local SCRIPT_VERSION = 8
 local CONFIG_PATH = "bloxfruit_config.json"
 
 local Players = game:GetService("Players")
@@ -82,6 +82,7 @@ local state = {
     espOnlySelected = false,
     espRange = 1200,
     selectedPlayer = nil,
+    selectedIsland = nil,
     spectate = false,
     colorFruit = {255, 200, 60},
     colorChest = {60, 220, 120},
@@ -1022,6 +1023,81 @@ local function nearestQuest()
     return best, bestDistance
 end
 
+
+-- ===== ilhas / destinos =====
+local ISLAND_NAMES = {
+    Bandit = true, Jungle = true, Marine = true, Pirate = true, Desert = true,
+    Snow = true, Volcano = true, Sky = true, Fountain = true, Colosseum = true,
+    Prison = true, Magma = true, Underwater = true, Kingdom = true, Ice = true,
+    Cursed = true, Hydra = true, Castle = true, Dressrosa = true, Zou = true,
+    Wano = true, Fishman = true, Rumble = true, Cafe = true, Mansion = true,
+}
+
+local function collectIslands()
+    local out = {}
+    local seen = {}
+    local function add(name, position)
+        if not name or name == "" or seen[name] or not position then
+            return
+        end
+        seen[name] = true
+        out[#out + 1] = {name = name, position = position}
+    end
+
+    local folder = Workspace:FindFirstChild("Islands")
+            or Workspace:FindFirstChild("Island")
+    if folder then
+        for _, model in ipairs(folder:GetChildren()) do
+            local part = model:FindFirstChildWhichIsA("BasePart")
+                    or model:FindFirstChild("HumanoidRootPart", true)
+            if part then
+                add(model.Name, part.Position)
+            end
+        end
+    end
+
+    for _, model in ipairs(Workspace:GetChildren()) do
+        if model:IsA("Model") and ISLAND_NAMES[model.Name] then
+            local part = model:FindFirstChildWhichIsA("BasePart")
+                    or model:FindFirstChild("HumanoidRootPart", true)
+            if part then
+                add(model.Name, part.Position)
+            end
+        end
+    end
+
+    for _, entry in ipairs(collectQuestPrompts()) do
+        local label = entry.label ~= "" and entry.label or entry.path
+        add("Missao: " .. label, entry.part.Position)
+    end
+
+    table.sort(out, function(a, b)
+        return a.name < b.name
+    end)
+    return out
+end
+
+local islandCache = {}
+
+local function refreshIslands()
+    islandCache = collectIslands()
+    return islandCache
+end
+
+local function findIsland(name)
+    for _, island in ipairs(islandCache) do
+        if island.name == name then
+            return island
+        end
+    end
+    for _, island in ipairs(refreshIslands()) do
+        if island.name == name then
+            return island
+        end
+    end
+    return nil
+end
+
 local function questCycle()
     local level = playerLevel()
     local entry, distance = nearestQuest()
@@ -1320,6 +1396,20 @@ local function showPreview(player)
     end
     world:ClearAllChildren()
     clone.Parent = world
+
+    local primary = clone.PrimaryPart or clone:FindFirstChild("HumanoidRootPart")
+    if primary then
+        clone.PrimaryPart = primary
+        clone:PivotTo(CFrame.new(0, 0, 0))
+    end
+    for _, part in ipairs(clone:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.Anchored = true
+            part.CanCollide = false
+        end
+    end
+
+    previewAngle = 0
     previewPlayer = player
     previewTitle.Text = player.Name
     previewGui.Enabled = true
@@ -1333,7 +1423,7 @@ local function updatePreview(dt)
     previewAngle = previewAngle + dt * 0.7
     local radius = 13
     previewCamera.CFrame = CFrame.new(
-            Vector3.new(math.sin(previewAngle) * radius, 4, math.cos(previewAngle) * radius),
+            Vector3.new(math.sin(previewAngle) * radius, 4.5, math.cos(previewAngle) * radius),
             Vector3.new(0, 2.5, 0))
 end
 
@@ -2342,6 +2432,121 @@ TpTab:CreateSlider({
     end,
 })
 
+local islandDropdown = nil
+local playerTpDropdown = nil
+
+islandDropdown = TpTab:CreateDropdown({
+    Name = "Ilha / missao (lista)",
+    Options = {"(atualize a lista)"},
+    CurrentOption = {"(atualize a lista)"},
+    MultipleOptions = false,
+    Callback = function(option)
+        local name = type(option) == "table" and option[1] or option
+        if name then
+            state.selectedIsland = name
+        end
+    end,
+})
+
+TpTab:CreateButton({
+    Name = "Atualizar lista de ilhas",
+    Callback = function()
+        local list = refreshIslands()
+        local names = {}
+        for _, island in ipairs(list) do
+            names[#names + 1] = island.name
+        end
+        if #names == 0 then
+            names = {"(nenhuma encontrada)"}
+        end
+        if islandDropdown then
+            islandDropdown:Refresh(names)
+        end
+        Log.add("INFO", "ilhas encontradas: " .. #list)
+        for _, island in ipairs(list) do
+            Log.add("INFO", string.format("  %s | %.0f, %.0f, %.0f", island.name,
+                    island.position.X, island.position.Y, island.position.Z))
+        end
+        Rayfield:Notify({Title = "Ilhas", Content = #list .. " destino(s).", Duration = 4})
+    end,
+})
+
+TpTab:CreateButton({
+    Name = "Viajar flutuando para a ilha",
+    Callback = function()
+        local name = state.selectedIsland
+        local island = name and findIsland(name)
+        if not island then
+            Rayfield:Notify({Title = "Viagem", Content = "Escolhe uma ilha na lista.", Duration = 4})
+            return
+        end
+        task.spawn(function()
+            status("viajando para " .. island.name)
+            Log.add("ACAO", "viagem para " .. island.name)
+            local ok, err = pcall(function()
+                travelTo(island.position + Vector3.new(0, 6, 0), state.travelSpeed)
+            end)
+            if ok then
+                status("chegou em " .. island.name)
+                Log.add("ACAO", "chegou em " .. island.name)
+            else
+                Log.add("ERRO", "viagem: " .. tostring(err))
+            end
+        end)
+    end,
+})
+
+playerTpDropdown = TpTab:CreateDropdown({
+    Name = "Jogador (lista)",
+    Options = {"(vazio)"},
+    CurrentOption = {"(vazio)"},
+    MultipleOptions = false,
+    Callback = function(option)
+        local name = type(option) == "table" and option[1] or option
+        if name and name ~= "(vazio)" then
+            state.selectedPlayer = name
+        end
+    end,
+})
+
+TpTab:CreateButton({
+    Name = "Ir ate o jogador selecionado",
+    Callback = function()
+        local name = state.selectedPlayer
+        local player = name and Players:FindFirstChild(name)
+        local root = player and player.Character
+                and player.Character:FindFirstChild("HumanoidRootPart")
+        if not root then
+            Rayfield:Notify({Title = "Viagem", Content = "Jogador sem personagem.", Duration = 4})
+            return
+        end
+        task.spawn(function()
+            status("indo ate " .. player.Name)
+            Log.add("ACAO", "indo ate o jogador " .. player.Name)
+            travelTo(root.Position + Vector3.new(0, 6, 0), state.travelSpeed)
+        end)
+    end,
+})
+
+TpTab:CreateButton({
+    Name = "Atualizar lista de jogadores",
+    Callback = function()
+        local names = {}
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                names[#names + 1] = player.Name
+            end
+        end
+        if #names == 0 then
+            names = {"(vazio)"}
+        end
+        if playerTpDropdown then
+            playerTpDropdown:Refresh(names)
+        end
+        Rayfield:Notify({Title = "Jogadores", Content = #names .. " na lista.", Duration = 3})
+    end,
+})
+
 TpTab:CreateButton({
     Name = "Ir para o spawn flutuando",
     Callback = function()
@@ -2844,6 +3049,35 @@ task.spawn(function()
                 vu:CaptureController()
                 vu:ClickButton2(Vector2.new())
             end)
+        end
+    end
+end)
+
+task.spawn(function()
+    while _G.__bloxHub == session do
+        task.wait(10)
+        pcall(function()
+            local list = refreshIslands()
+            if islandDropdown and #list > 0 then
+                local names = {}
+                for _, island in ipairs(list) do
+                    names[#names + 1] = island.name
+                end
+                islandDropdown:Refresh(names)
+            end
+        end)
+        if playerTpDropdown then
+            local names = {}
+            for _, player in ipairs(Players:GetPlayers()) do
+                if player ~= LocalPlayer then
+                    names[#names + 1] = player.Name
+                end
+            end
+            if #names > 0 then
+                pcall(function()
+                    playerTpDropdown:Refresh(names)
+                end)
+            end
         end
     end
 end)
