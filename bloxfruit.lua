@@ -2,7 +2,7 @@
 -- executor: Delta, Xeno, Solara, Fluxus, Wave
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/bloxfruit-hub/main"
-local SCRIPT_VERSION = 8
+local SCRIPT_VERSION = 9
 local CONFIG_PATH = "bloxfruit_config.json"
 
 local Players = game:GetService("Players")
@@ -55,7 +55,6 @@ local state = {
     autoFarm = false,
     autoFruit = false,
     autoChest = false,
-    autoQuest = false,
     autoEquip = true,
     fastAttack = false,
     killAura = false,
@@ -65,8 +64,6 @@ local state = {
     targetName = "auto",
     hitbox = false,
     hitboxSize = 14,
-    questName = "",
-    questLevel = 1,
     questSeconds = 45,
     autoQuestFly = false,
 
@@ -112,7 +109,7 @@ local FRUITS = {
 
 local NUMBER_KEYS = {"speed", "jump", "flySpeed", "maxFlyHeight", "travelSpeed",
                       "auraRange", "attackDelay", "farmRange", "hitboxSize",
-                      "espRange", "questLevel"}
+                      "espRange"}
 local BOOL_KEYS = {"jumpFly", "espFruit", "espChest", "espPlayer", "espMob",
                    "espName", "espHealth", "espDistance", "espTracer",
                    "autoEquip", "antiAfk"}
@@ -153,7 +150,6 @@ if saved then
             state[key] = saved[key]
         end
     end
-    state.questName = saved.questName or state.questName
     if type(saved.waypoints) == "table" then
         state.waypoints = saved.waypoints
     end
@@ -170,8 +166,7 @@ local function saveConfig()
     if not hasFileApi() then
         return false
     end
-    local data = {version = SCRIPT_VERSION, waypoints = state.waypoints,
-                  questName = state.questName}
+    local data = {version = SCRIPT_VERSION, waypoints = state.waypoints}
     for _, key in ipairs(NUMBER_KEYS) do
         data[key] = state[key]
     end
@@ -970,6 +965,40 @@ local function farmCycle()
 end
 
 -- ===== missoes =====
+
+local questCache = {at = 0, value = nil}
+
+local function readQuest()
+    if os.clock() - questCache.at < 0.4 then
+        return questCache.value
+    end
+    questCache.at = os.clock()
+    local gui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not gui then
+        return nil
+    end
+    for _, object in ipairs(gui:GetDescendants()) do
+        if object:IsA("TextLabel") and object.Visible then
+            local text = object.Text or ""
+            local lower = string.lower(text)
+            if string.find(lower, "defeat", 1, true) or string.find(lower, "derrote", 1, true)
+                    or string.find(lower, "derrotar", 1, true) then
+                local current, total = string.match(text, "(%d+)%s*/%s*(%d+)")
+                questCache.value = {
+                    current = tonumber(current) or 0,
+                    total = tonumber(total) or 0,
+                    text = text,
+                }
+                return questCache.value
+            end
+        end
+    end
+    questCache.value = nil
+    return nil
+end
+
+local questRun = {npc = nil, index = 1, lastAccept = 0, lastLog = 0}
+
 local function playerLevel()
     local ok, value = pcall(function()
         return LocalPlayer.Data.Level.Value
@@ -1100,64 +1129,90 @@ end
 
 local function questCycle()
     local level = playerLevel()
-    local entry, distance = nearestQuest()
-    Log.add("INFO", string.format("missao: nivel %d | prompts %d", level, #collectQuestPrompts()))
-    if not entry then
-        status("missao: nenhum NPC encontrado")
+    local info = readQuest()
+
+    if info then
+        if info.current > 0 then
+            status(string.format("missao: faltam %d", info.current))
+            if os.clock() - questRun.lastLog > 5 then
+                questRun.lastLog = os.clock()
+                Log.add("INFO", string.format("missao nivel %d: %d de %d restantes",
+                        level, info.current, info.total))
+            end
+            local enemy = pickTarget()
+            if enemy then
+                local mine = rootPart()
+                if mine and (enemy.part.Position - mine.Position).Magnitude > 18 then
+                    travelTo(enemy.part.Position + Vector3.new(0, 3, 0), state.flySpeed)
+                end
+                local untilTime = os.clock() + 2
+                while os.clock() < untilTime and _G.__bloxHub == session do
+                    if not aliveRoot(enemy.model) then
+                        break
+                    end
+                    activateTool()
+                    task.wait(state.attackDelay)
+                end
+            else
+                task.wait(0.3)
+            end
+            return true
+        end
+
+        if questRun.npc and questRun.npc.part then
+            status("missao: entregando")
+            Log.add("ACAO", "missao: voltando para entregar em " .. questRun.npc.path)
+            travelTo(questRun.npc.part.Position + Vector3.new(0, 3, 0), state.travelSpeed)
+            pcall(function()
+                fireproximityprompt(questRun.npc.prompt)
+            end)
+            task.wait(2)
+            questRun.npc = nil
+            return true
+        end
+    end
+
+    if os.clock() - questRun.lastAccept < 6 then
+        task.wait(0.5)
         return false
     end
-    status(string.format("missao: NPC a %d studs", math.floor(distance)))
-    Log.add("ACAO", string.format("missao: indo ao NPC %s (%s)", entry.path, entry.label))
 
-    local owned = false
-    if not flyRig.active then
-        if not buildRig() then
-            return false
-        end
-        owned = true
+    local prompts = collectQuestPrompts()
+    if #prompts == 0 then
+        status("missao: nenhum NPC no mapa")
+        return false
     end
-
-    travelTo(entry.part.Position + Vector3.new(0, 3, 0), state.travelSpeed)
-
-    local fired = pcall(function()
-        fireproximityprompt(entry.prompt)
+    local mine = rootPart()
+    if not mine then
+        return false
+    end
+    table.sort(prompts, function(a, b)
+        return (a.part.Position - mine.Position).Magnitude < (b.part.Position - mine.Position).Magnitude
     end)
-    Log.add(fired and "ACAO" or "ERRO", "missao: prompt disparado = " .. tostring(fired))
+
+    questRun.lastAccept = os.clock()
+    local index = ((questRun.index - 1) % #prompts) + 1
+    local npc = prompts[index]
+    questRun.index = index + 1
+
+    status("missao: indo aceitar " .. (npc.label ~= "" and npc.label or npc.path))
+    Log.add("ACAO", string.format("missao: tentando NPC %s (%d studs)", npc.path,
+            math.floor((npc.part.Position - mine.Position).Magnitude)))
+
+    travelTo(npc.part.Position + Vector3.new(0, 3, 0), state.travelSpeed)
+    pcall(function()
+        fireproximityprompt(npc.prompt)
+    end)
     task.wait(1.5)
 
-    local deadline = os.clock() + state.questSeconds
-    local killed = 0
-    while os.clock() < deadline and _G.__bloxHub == session do
-        local enemy = pickTarget()
-        if enemy then
-            local mine = rootPart()
-            if mine and (enemy.part.Position - mine.Position).Magnitude > 18 then
-                travelTo(enemy.part.Position + Vector3.new(0, 3, 0), state.flySpeed)
-            end
-            local attackUntil = os.clock() + 2
-            while os.clock() < attackUntil do
-                if not aliveRoot(enemy.model) then
-                    killed = killed + 1
-                    break
-                end
-                activateTool()
-                task.wait(state.attackDelay)
-            end
-        else
-            task.wait(0.4)
-        end
-    end
-
-    Log.add("ACAO", "missao: " .. killed .. " mortes no ciclo")
-
-    travelTo(entry.part.Position + Vector3.new(0, 3, 0), state.travelSpeed)
-    pcall(function()
-        fireproximityprompt(entry.prompt)
-    end)
-    Log.add("ACAO", "missao: tentativa de entrega")
-
-    if owned then
-        destroyRig()
+    local after = readQuest()
+    if after then
+        questRun.npc = npc
+        Log.add("ACAO", string.format("missao aceita: %s | %d/%d",
+                npc.label ~= "" and npc.label or npc.path, after.current, after.total))
+        status("missao aceita")
+    else
+        Log.add("AVISO", "jogo recusou: " .. npc.path)
     end
     return true
 end
@@ -1217,22 +1272,6 @@ local function chestCycle()
     if owned then
         destroyRig()
     end
-    return ok
-end
-
-local commF = nil
-pcall(function()
-    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-    commF = remotes and remotes:FindFirstChild("CommF_")
-end)
-
-local function startQuest()
-    if not commF or state.questName == "" then
-        return false
-    end
-    local ok = pcall(function()
-        commF:InvokeServer("StartQuest", state.questName, state.questLevel)
-    end)
     return ok
 end
 
@@ -1942,42 +1981,12 @@ FarmTab:CreateSlider({
     end,
 })
 
-FarmTab:CreateInput({
-    Name = "Nome da missao",
-    CurrentValue = "",
-    PlaceholderText = "ex: Bandit",
-    RemoveTextAfterFocusLost = false,
-    Callback = function(text)
-        state.questName = text
-        markDirty()
-    end,
-})
-
-FarmTab:CreateSlider({
-    Name = "Nivel da missao",
-    Range = {1, 2600},
-    Increment = 1,
-    CurrentValue = 1,
-    Callback = function(value)
-        state.questLevel = value
-        markDirty()
-    end,
-})
-
 FarmTab:CreateToggle({
-    Name = "Auto missao",
-    CurrentValue = false,
-    Callback = function(value)
-        state.autoQuest = value
-    end,
-})
-
-FarmTab:CreateToggle({
-    Name = "Auto missao voando + farm",
+    Name = "Auto missao (automatico)",
     CurrentValue = false,
     Callback = function(value)
         state.autoQuestFly = value
-        Log.add("INFO", "auto missao voando = " .. tostring(value))
+        Log.add("INFO", "auto missao automatico = " .. tostring(value))
     end,
 })
 
@@ -1990,44 +1999,6 @@ FarmTab:CreateSlider({
     Callback = function(value)
         state.questSeconds = value
         markDirty()
-    end,
-})
-
-FarmTab:CreateButton({
-    Name = "Ir para missao agora",
-    Callback = function()
-        task.spawn(function()
-            local ok, err = pcall(questCycle)
-            if not ok then
-                Log.add("ERRO", "questCycle: " .. tostring(err))
-            end
-        end)
-    end,
-})
-
-FarmTab:CreateButton({
-    Name = "Listar NPCs de missao",
-    Callback = function()
-        local mine = rootPart()
-        local entries = collectQuestPrompts()
-        Log.add("INFO", "prompts de missao encontrados: " .. #entries)
-        for _, entry in ipairs(entries) do
-            local distance = mine and math.floor((entry.part.Position - mine.Position).Magnitude) or -1
-            Log.add("INFO", string.format("  %s | action='%s' label='%s' | %d studs",
-                    entry.path, entry.action, entry.label, distance))
-        end
-        setLogPanel(true)
-    end,
-})
-
-FarmTab:CreateButton({
-    Name = "Iniciar missao agora",
-    Callback = function()
-        if startQuest() then
-            Rayfield:Notify({Title = "Missao", Content = "Pedido enviado.", Duration = 3})
-        else
-            Rayfield:Notify({Title = "Missao", Content = "Falhou. Ve nome e nivel.", Duration = 4})
-        end
     end,
 })
 
@@ -3011,14 +2982,7 @@ task.spawn(function()
     end
 end)
 
-task.spawn(function()
-    while _G.__bloxHub == session do
-        task.wait(10)
-        if state.autoQuest then
-            startQuest()
-        end
-    end
-end)
+
 
 task.spawn(function()
     while _G.__bloxHub == session do
