@@ -2,7 +2,7 @@
 -- executor: Delta, Xeno, Solara, Fluxus, Wave
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/bloxfruit-hub/main"
-local SCRIPT_VERSION = 9
+local SCRIPT_VERSION = 10
 local CONFIG_PATH = "bloxfruit_config.json"
 
 local Players = game:GetService("Players")
@@ -267,6 +267,7 @@ end
 
 -- ===== voo / deslocamento =====
 local flyRig = {
+    lock = 0,
     active = false,
     align = nil,
     orient = nil,
@@ -345,6 +346,9 @@ local function updateFly(dt)
         end
         return
     end
+    if flyRig.lock > 0 then
+        return
+    end
     if flyRig.active and (not flyRig.align or not flyRig.align.Parent) then
         destroyRig()
     end
@@ -389,6 +393,9 @@ local function updateFly(dt)
 end
 
 local function cframeTravel(target, speed)
+    if flyRig.active then
+        destroyRig()
+    end
     local deadline = os.clock() + 15
     while os.clock() < deadline do
         if _G.__bloxHub ~= session then
@@ -420,6 +427,7 @@ local function travelTo(target, speed)
     if not root or not target then
         return false
     end
+
     local owned = false
     if not flyRig.active then
         if not buildRig() then
@@ -428,68 +436,91 @@ local function travelTo(target, speed)
         owned = true
     end
 
-    flyRig.target = root.Position
-    flyRig.align.Position = flyRig.target
+    flyRig.lock = flyRig.lock + 1
 
-    local maxSpeed = math.min(speed, 220)
-    local deadline = os.clock() + 15
-    local reached = false
-    local watchdog = os.clock()
-    local watchPos = root.Position
-
-    while os.clock() < deadline do
-        if _G.__bloxHub ~= session then
-            break
-        end
-        if not rootPart() or not flyRig.align then
-            break
-        end
-        local dt = RunService.Heartbeat:Wait()
-        if dt > 0.25 then
-            dt = 0.25
-        end
-        local delta = target - flyRig.target
-        if delta.Magnitude < 6 then
-            reached = true
-            break
-        end
-        local flat = Vector3.new(delta.X, 0, delta.Z)
-        local direction = flat.Magnitude > 0.1 and flat.Unit or Vector3.zero
-        local lift = 0
-        if delta.Y > 3 then
-            lift = 1
-        elseif delta.Y < -3 then
-            lift = -1
-        end
-        local move = direction + Vector3.new(0, lift, 0)
-        if move.Magnitude > 0.01 then
-            flyRig.target = flyRig.target + move.Unit * maxSpeed * dt
+    local ok, reached = pcall(function()
+        flyRig.target = root.Position
+        if not flyRig.align then
+            return false
         end
         flyRig.align.Position = flyRig.target
 
-        if os.clock() - watchdog > 1.2 then
-            local now = rootPart()
-            if now and (now.Position - watchPos).Magnitude < 8 then
-                if owned then
-                    destroyRig()
+        local maxSpeed = math.min(speed, 220)
+        local deadline = os.clock() + 15
+        local arrived = false
+        local watchdog = os.clock()
+        local watchPos = root.Position
+
+        while os.clock() < deadline do
+            if _G.__bloxHub ~= session then
+                break
+            end
+            if not rootPart() or not flyRig.align or not flyRig.target then
+                break
+            end
+            local dt = RunService.Heartbeat:Wait()
+            if dt > 0.25 then
+                dt = 0.25
+            end
+            local delta = target - flyRig.target
+            if delta.Magnitude < 6 then
+                arrived = true
+                break
+            end
+            local flat = Vector3.new(delta.X, 0, delta.Z)
+            local direction = flat.Magnitude > 0.1 and flat.Unit or Vector3.zero
+            local lift = 0
+            if delta.Y > 3 then
+                lift = 1
+            elseif delta.Y < -3 then
+                lift = -1
+            end
+            local move = direction + Vector3.new(0, lift, 0)
+            if move.Magnitude > 0.01 then
+                flyRig.target = flyRig.target + move.Unit * maxSpeed * dt
+            end
+            flyRig.align.Position = flyRig.target
+
+            if os.clock() - watchdog > 1.2 then
+                local now = rootPart()
+                if now and (now.Position - watchPos).Magnitude < 8 then
+                    return "stuck"
                 end
-                state.moveMode = "cframe"
-                status("movimento: CFrame")
-                return cframeTravel(target, speed)
+                if now then
+                    watchPos = now.Position
+                end
+                watchdog = os.clock()
             end
-            if now then
-                watchPos = now.Position
-            end
-            watchdog = os.clock()
         end
+        return arrived
+    end)
+
+    flyRig.lock = math.max(0, flyRig.lock - 1)
+
+    if not ok then
+        Log.add("ERRO", "travelTo: " .. tostring(reached))
+        if owned then
+            destroyRig()
+        end
+        return false
+    end
+
+    if reached == "stuck" then
+        if owned then
+            destroyRig()
+        end
+        state.moveMode = "cframe"
+        status("movimento: CFrame")
+        return cframeTravel(target, speed)
     end
 
     if owned then
         destroyRig()
     end
+
     Log.add(reached and "ACAO" or "AVISO",
             string.format("deslocamento %s | modo %s", reached and "ok" or "incompleto", state.moveMode))
-    return reached
+    return reached == true
 end
 
 local function touchSweep(seconds)
@@ -534,7 +565,7 @@ local function collectEnemies()
             return
         end
         seen[model] = true
-        if isPlayerCharacter(model) then
+        if isPlayerCharacter(model) or Players:FindFirstChild(model.Name) then
             return
         end
         local root = aliveRoot(model)
@@ -548,6 +579,13 @@ local function collectEnemies()
         for _, model in ipairs(enemies:GetChildren()) do
             if model:IsA("Model") then
                 consider(model)
+            end
+        end
+        if #out == 0 then
+            for _, model in ipairs(enemies:GetDescendants()) do
+                if model:IsA("Model") then
+                    consider(model)
+                end
             end
         end
     end
@@ -604,6 +642,13 @@ local function collectChests()
     if folder then
         for _, object in ipairs(folder:GetChildren()) do
             consider(object)
+        end
+    end
+    if #out == 0 then
+        for _, object in ipairs(Workspace:GetDescendants()) do
+            if string.find(string.lower(object.Name), "chest", 1, true) then
+                consider(object)
+            end
         end
     end
     return out
