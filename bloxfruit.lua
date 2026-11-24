@@ -1,9 +1,8 @@
--- Blox Fruits | hub v2
+-- Blox Fruits | hub v4
 -- executor: Delta, Xeno, Solara, Fluxus, Wave
--- sem webhook, sem HttpPost.
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/bloxfruit-hub/main"
-local SCRIPT_VERSION = 3
+local SCRIPT_VERSION = 4
 local CONFIG_PATH = "bloxfruit_config.json"
 
 local Players = game:GetService("Players")
@@ -12,6 +11,8 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
+local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer
 
 local previous = _G.__bloxHub
@@ -20,14 +21,10 @@ if previous then
         if previous.window and previous.window.Destroy then
             previous.window:Destroy()
         end
-        if previous.bubble then
-            previous.bubble:Destroy()
-        end
-        if previous.statusGui then
-            previous.statusGui:Destroy()
-        end
-        if previous.espFolder then
-            previous.espFolder:Destroy()
+        for _, key in ipairs({"bubble", "statusGui", "espFolder", "tracerFolder"}) do
+            if previous[key] then
+                previous[key]:Destroy()
+            end
         end
         if previous.stopFly then
             previous.stopFly()
@@ -48,23 +45,45 @@ local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 local state = {
     speed = 16,
     jump = 50,
-    flySpeed = 120,
+    flySpeed = 150,
     fly = false,
     jumpFly = true,
-    maxFlyHeight = 250,
+    maxFlyHeight = 300,
+    moveMode = "rig",
+    travelSpeed = 150,
+
     autoFarm = false,
     autoFruit = false,
     autoChest = false,
+    autoQuest = false,
+    autoEquip = true,
     fastAttack = false,
+    killAura = false,
+    auraRange = 40,
     attackDelay = 0.08,
-    farmRange = 800,
+    farmRange = 1000,
+    targetName = "auto",
+    hitbox = false,
+    hitboxSize = 14,
+    questName = "",
+    questLevel = 1,
+
     espFruit = true,
     espChest = true,
     espPlayer = false,
     espMob = false,
-    targetName = "auto",
-    moveMode = "rig",
-    autoEquip = true,
+    espName = true,
+    espHealth = true,
+    espDistance = true,
+    espTracer = false,
+    espRange = 1200,
+
+    antiAfk = true,
+    noClip = false,
+    fpsPack = false,
+    noFog = false,
+    noEffects = false,
+    lowQuality = false,
 }
 
 local FRUITS = {
@@ -77,6 +96,13 @@ local FRUITS = {
     Venom = true, Control = true, Spirit = true, Dragon = true, Leopard = true,
     Kitsune = true, Yeti = true, Gas = true, Blizzard = true, Pain = true,
 }
+
+local NUMBER_KEYS = {"speed", "jump", "flySpeed", "maxFlyHeight", "travelSpeed",
+                      "auraRange", "attackDelay", "farmRange", "hitboxSize",
+                      "espRange", "questLevel"}
+local BOOL_KEYS = {"jumpFly", "espFruit", "espChest", "espPlayer", "espMob",
+                   "espName", "espHealth", "espDistance", "espTracer",
+                   "autoEquip", "antiAfk"}
 
 local function hasFileApi()
     return type(writefile) == "function" and type(readfile) == "function"
@@ -106,16 +132,20 @@ end
 
 local saved = loadConfig()
 if saved then
-    for _, key in ipairs({"speed", "jump", "flySpeed", "maxFlyHeight",
-                          "farmRange", "attackDelay"}) do
+    for _, key in ipairs(NUMBER_KEYS) do
         state[key] = tonumber(saved[key]) or state[key]
     end
-    for _, key in ipairs({"jumpFly", "espFruit", "espChest", "espPlayer", "espMob"}) do
+    for _, key in ipairs(BOOL_KEYS) do
         if type(saved[key]) == "boolean" then
             state[key] = saved[key]
         end
     end
+    state.questName = saved.questName or state.questName
+    if type(saved.waypoints) == "table" then
+        state.waypoints = saved.waypoints
+    end
 end
+state.waypoints = state.waypoints or {}
 
 local dirty = false
 
@@ -127,20 +157,14 @@ local function saveConfig()
     if not hasFileApi() then
         return false
     end
-    local data = {
-        version = SCRIPT_VERSION,
-        speed = state.speed,
-        jump = state.jump,
-        flySpeed = state.flySpeed,
-        maxFlyHeight = state.maxFlyHeight,
-        farmRange = state.farmRange,
-        attackDelay = state.attackDelay,
-        jumpFly = state.jumpFly,
-        espFruit = state.espFruit,
-        espChest = state.espChest,
-        espPlayer = state.espPlayer,
-        espMob = state.espMob,
-    }
+    local data = {version = SCRIPT_VERSION, waypoints = state.waypoints,
+                  questName = state.questName}
+    for _, key in ipairs(NUMBER_KEYS) do
+        data[key] = state[key]
+    end
+    for _, key in ipairs(BOOL_KEYS) do
+        data[key] = state[key]
+    end
     local ok, encoded = pcall(function()
         return HttpService:JSONEncode(data)
     end)
@@ -172,7 +196,7 @@ local function rootPart()
     return char and char:FindFirstChild("HumanoidRootPart")
 end
 
--- ===== voo: AlignPosition =====
+-- ===== voo / deslocamento =====
 local flyRig = {
     active = false,
     align = nil,
@@ -296,7 +320,7 @@ local function updateFly(dt)
 end
 
 local function cframeTravel(target, speed)
-    local deadline = os.clock() + 12
+    local deadline = os.clock() + 15
     while os.clock() < deadline do
         if _G.__bloxHub ~= session then
             break
@@ -330,7 +354,7 @@ local function travelTo(target, speed)
     local owned = false
     if not flyRig.active then
         if not buildRig() then
-            return false
+            return cframeTravel(target, speed)
         end
         owned = true
     end
@@ -338,8 +362,8 @@ local function travelTo(target, speed)
     flyRig.target = root.Position
     flyRig.align.Position = flyRig.target
 
-    local maxSpeed = math.min(speed, 200)
-    local deadline = os.clock() + 12
+    local maxSpeed = math.min(speed, 220)
+    local deadline = os.clock() + 15
     local reached = false
     local watchdog = os.clock()
     local watchPos = root.Position
@@ -381,7 +405,7 @@ local function travelTo(target, speed)
                     destroyRig()
                 end
                 state.moveMode = "cframe"
-                status("movimento: trocando para CFrame")
+                status("movimento: CFrame")
                 return cframeTravel(target, speed)
             end
             if now then
@@ -413,7 +437,7 @@ local function touchSweep(seconds)
     flyRig.align.Position = center
 end
 
--- ===== descoberta de alvos =====
+-- ===== alvos =====
 local function isPlayerCharacter(model)
     return Players:GetPlayerFromCharacter(model) ~= nil
 end
@@ -456,7 +480,6 @@ local function collectEnemies()
             end
         end
     end
-
     if #out == 0 then
         for _, model in ipairs(Workspace:GetChildren()) do
             if model:IsA("Model") then
@@ -476,7 +499,6 @@ local function collectFruits()
             out[#out + 1] = {model = object, part = handle}
         end
     end
-
     for _, object in ipairs(Workspace:GetChildren()) do
         if object:IsA("Model") or object:IsA("Tool") then
             local lower = string.lower(object.Name)
@@ -485,7 +507,6 @@ local function collectFruits()
             end
         end
     end
-
     local folder = Workspace:FindFirstChild("Fruits")
     if folder then
         for _, object in ipairs(folder:GetChildren()) do
@@ -503,13 +524,11 @@ local function collectChests()
             out[#out + 1] = {model = object, part = part}
         end
     end
-
     for _, object in ipairs(Workspace:GetChildren()) do
         if string.find(string.lower(object.Name), "chest", 1, true) then
             consider(object)
         end
     end
-
     local folder = Workspace:FindFirstChild("Chests")
     if folder then
         for _, object in ipairs(folder:GetChildren()) do
@@ -519,9 +538,7 @@ local function collectChests()
     return out
 end
 
--- ===== ESP limpo =====
-local espFolder = nil
-
+-- ===== ESP =====
 local function uiRoot()
     if type(gethui) == "function" then
         local ok, value = pcall(gethui)
@@ -532,7 +549,7 @@ local function uiRoot()
     return game:GetService("CoreGui")
 end
 
-espFolder = Instance.new("Folder")
+local espFolder = Instance.new("Folder")
 espFolder.Name = "BloxEsp"
 pcall(function()
     espFolder.Parent = uiRoot()
@@ -540,28 +557,33 @@ end)
 session.espFolder = espFolder
 
 local espItems = {}
+local tracers = {}
 
 local function removeEsp(model)
     local item = espItems[model]
-    if not item then
-        return
+    if item then
+        for _, object in pairs(item) do
+            if typeof(object) == "Instance" then
+                pcall(function()
+                    object:Destroy()
+                end)
+            end
+        end
+        espItems[model] = nil
     end
-    for _, object in ipairs(item) do
+    local line = tracers[model]
+    if line then
         pcall(function()
-            object:Destroy()
+            line:Remove()
         end)
+        tracers[model] = nil
     end
-    espItems[model] = nil
 end
 
-local function ensureEsp(model, part, color, text)
+local function ensureEsp(model, part, color, title)
     local item = espItems[model]
-    if item and item[1] and item[1].Parent then
-        if item[3] then
-            local distance = (rootPart() and (part.Position - rootPart().Position).Magnitude) or 0
-            item[3].Text = string.format("%s  [%d]", text, math.floor(distance))
-        end
-        return
+    if item and item.highlight and item.highlight.Parent then
+        return item
     end
 
     local highlight = Instance.new("Highlight")
@@ -573,45 +595,131 @@ local function ensureEsp(model, part, color, text)
     highlight.Parent = espFolder
 
     local billboard = Instance.new("BillboardGui")
-    billboard.Size = UDim2.fromOffset(130, 20)
-    billboard.StudsOffset = Vector3.new(0, 3.2, 0)
+    billboard.Size = UDim2.fromOffset(150, 34)
+    billboard.StudsOffset = Vector3.new(0, 3.4, 0)
     billboard.AlwaysOnTop = true
-    billboard.MaxDistance = 900
+    billboard.MaxDistance = state.espRange
     billboard.Adornee = part
     billboard.Parent = espFolder
 
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.fromScale(1, 1)
-    label.BackgroundTransparency = 1
-    label.Font = Enum.Font.Gotham
-    label.TextSize = 12
-    label.TextColor3 = color
-    label.TextStrokeTransparency = 0.55
-    label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-    label.Text = text
-    label.Parent = billboard
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Size = UDim2.new(1, 0, 0.55, 0)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Font = Enum.Font.Gotham
+    nameLabel.TextSize = 12
+    nameLabel.TextColor3 = color
+    nameLabel.TextStrokeTransparency = 0.55
+    nameLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    nameLabel.Text = title
+    nameLabel.Parent = billboard
 
-    espItems[model] = {highlight, billboard, label}
+    local barBack = Instance.new("Frame")
+    barBack.Size = UDim2.new(0.8, 0, 0.14, 0)
+    barBack.Position = UDim2.new(0.1, 0, 0.62, 0)
+    barBack.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    barBack.BorderSizePixel = 0
+    barBack.Parent = billboard
+
+    local barFill = Instance.new("Frame")
+    barFill.Size = UDim2.fromScale(1, 1)
+    barFill.BackgroundColor3 = Color3.fromRGB(90, 220, 120)
+    barFill.BorderSizePixel = 0
+    barFill.Parent = barBack
+
+    item = {highlight = highlight, billboard = billboard, label = nameLabel,
+            barBack = barBack, barFill = barFill}
+    espItems[model] = item
+
+    if state.espTracer and Drawing then
+        local line = Drawing.new("Line")
+        line.Thickness = 1
+        line.Color = color
+        line.Transparency = 0.6
+        tracers[model] = line
+    end
+    return item
+end
+
+local function screenPoint(part)
+    local camera = Workspace.CurrentCamera
+    if not camera then
+        return nil
+    end
+    local point, onScreen = camera:WorldToViewportPoint(part.Position)
+    if not onScreen then
+        return nil
+    end
+    return Vector2.new(point.X, point.Y)
 end
 
 local function refreshEsp()
     local active = {}
+    local mine = rootPart()
+
+    local function handle(entry, color, title)
+        active[entry.model] = true
+        local item = ensureEsp(entry.model, entry.part, color, title)
+        if not item or not item.highlight or not item.highlight.Parent then
+            return
+        end
+        local distance = mine and (entry.part.Position - mine.Position).Magnitude or 0
+        if distance > state.espRange then
+            item.billboard.Enabled = false
+            item.highlight.Enabled = false
+            return
+        end
+        item.highlight.Enabled = true
+        item.billboard.Enabled = true
+
+        local pieces = {}
+        if state.espName then
+            pieces[#pieces + 1] = title
+        end
+        if state.espDistance then
+            pieces[#pieces + 1] = string.format("[%d]", math.floor(distance))
+        end
+        item.label.Text = table.concat(pieces, " ")
+        item.barBack.Visible = state.espHealth
+
+        local hum = entry.model:FindFirstChildOfClass("Humanoid")
+        if hum and hum.MaxHealth > 0 then
+            local ratio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+            item.barFill.Size = UDim2.fromScale(ratio, 1)
+            item.barFill.BackgroundColor3 = Color3.fromRGB(220 * (1 - ratio) + 90 * ratio,
+                    90 + 130 * ratio, 90)
+        end
+
+        local line = tracers[entry.model]
+        if line then
+            if state.espTracer then
+                local point = screenPoint(entry.part)
+                if point then
+                    line.From = Vector2.new(Workspace.CurrentCamera.ViewportSize.X / 2,
+                            Workspace.CurrentCamera.ViewportSize.Y)
+                    line.To = point
+                    line.Visible = true
+                else
+                    line.Visible = false
+                end
+            else
+                line.Visible = false
+            end
+        end
+    end
+
     if state.espFruit then
         for _, fruit in ipairs(collectFruits()) do
-            active[fruit.model] = true
-            ensureEsp(fruit.model, fruit.part, Color3.fromRGB(255, 200, 60), fruit.model.Name)
+            handle(fruit, Color3.fromRGB(255, 200, 60), fruit.model.Name)
         end
     end
     if state.espChest then
         for _, chest in ipairs(collectChests()) do
-            active[chest.model] = true
-            ensureEsp(chest.model, chest.part, Color3.fromRGB(60, 220, 120), "bau")
+            handle(chest, Color3.fromRGB(60, 220, 120), "bau")
         end
     end
     if state.espMob then
         for _, enemy in ipairs(collectEnemies()) do
-            active[enemy.model] = true
-            ensureEsp(enemy.model, enemy.part, Color3.fromRGB(255, 80, 80), enemy.model.Name)
+            handle(enemy, Color3.fromRGB(255, 80, 80), enemy.model.Name)
         end
     end
     if state.espPlayer then
@@ -619,8 +727,8 @@ local function refreshEsp()
             if player ~= LocalPlayer and player.Character then
                 local root = player.Character:FindFirstChild("HumanoidRootPart")
                 if root then
-                    active[player.Character] = true
-                    ensureEsp(player.Character, root, Color3.fromRGB(80, 160, 255), player.Name)
+                    handle({model = player.Character, part = root},
+                            Color3.fromRGB(80, 160, 255), player.Name)
                 end
             end
         end
@@ -629,6 +737,15 @@ local function refreshEsp()
     for model in pairs(espItems) do
         if not active[model] or not model.Parent then
             removeEsp(model)
+        end
+    end
+    for model in pairs(tracers) do
+        if not active[model] then
+            local line = tracers[model]
+            pcall(function()
+                line:Remove()
+            end)
+            tracers[model] = nil
         end
     end
 end
@@ -645,10 +762,7 @@ local function equipTool()
     end
     local char = LocalPlayer.Character
     local backpack = LocalPlayer:FindFirstChild("Backpack")
-    if not char or not backpack then
-        return
-    end
-    if char:FindFirstChildOfClass("Tool") then
+    if not char or not backpack or char:FindFirstChildOfClass("Tool") then
         return
     end
     local hum = char:FindFirstChildOfClass("Humanoid")
@@ -698,10 +812,10 @@ end
 local function farmCycle()
     local enemy, distance = pickTarget()
     if not enemy or distance > state.farmRange then
-        status("farm: sem alvo em " .. math.floor(state.farmRange) .. " studs")
+        status("farm: sem alvo")
         return false
     end
-    status(string.format("farm: %s | %d studs", enemy.model.Name, math.floor(distance)))
+    status(string.format("farm: %s | %d", enemy.model.Name, math.floor(distance)))
 
     local owned = false
     if not flyRig.active then
@@ -711,8 +825,7 @@ local function farmCycle()
         owned = true
     end
 
-    local target = enemy.part.Position + Vector3.new(0, 3, 0)
-    travelTo(target, state.flySpeed)
+    travelTo(enemy.part.Position + Vector3.new(0, 3, 0), state.flySpeed)
 
     local started = os.clock()
     while os.clock() - started < 3 and _G.__bloxHub == session do
@@ -722,7 +835,9 @@ local function farmCycle()
         local mine = rootPart()
         if mine and (enemy.part.Position - mine.Position).Magnitude > 14 then
             flyRig.target = enemy.part.Position + Vector3.new(0, 3, 0)
-            flyRig.align.Position = flyRig.target
+            if flyRig.align then
+                flyRig.align.Position = flyRig.target
+            end
         end
         activateTool()
         task.wait(state.attackDelay)
@@ -737,11 +852,11 @@ end
 local function fruitCycle()
     local fruits = collectFruits()
     if #fruits == 0 then
-        status("fruta: nenhuma no mapa")
+        status("fruta: nenhuma")
         return false
     end
     local fruit = fruits[1]
-    status("fruta: indo em " .. fruit.model.Name)
+    status("fruta: " .. fruit.model.Name)
 
     local owned = false
     if not flyRig.active then
@@ -750,13 +865,10 @@ local function fruitCycle()
         end
         owned = true
     end
-
-    local ok = travelTo(fruit.part.Position + Vector3.new(0, 3, 0), state.flySpeed)
+    local ok = travelTo(fruit.part.Position + Vector3.new(0, 3, 0), state.travelSpeed)
     if ok then
         touchSweep(1.0)
-        status("fruta: " .. fruit.model.Name .. " ao alcance")
     end
-
     if owned then
         destroyRig()
     end
@@ -766,11 +878,11 @@ end
 local function chestCycle()
     local chests = collectChests()
     if #chests == 0 then
-        status("bau: nenhum no mapa")
+        status("bau: nenhum")
         return false
     end
     local chest = chests[1]
-    status("bau: indo abrir")
+    status("bau: indo")
 
     local owned = false
     if not flyRig.active then
@@ -779,16 +891,58 @@ local function chestCycle()
         end
         owned = true
     end
-
-    local ok = travelTo(chest.part.Position + Vector3.new(0, 3, 0), state.flySpeed)
+    local ok = travelTo(chest.part.Position + Vector3.new(0, 3, 0), state.travelSpeed)
     if ok then
         touchSweep(0.8)
     end
-
     if owned then
         destroyRig()
     end
     return ok
+end
+
+local commF = nil
+pcall(function()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    commF = remotes and remotes:FindFirstChild("CommF_")
+end)
+
+local function startQuest()
+    if not commF or state.questName == "" then
+        return false
+    end
+    local ok = pcall(function()
+        commF:InvokeServer("StartQuest", state.questName, state.questLevel)
+    end)
+    return ok
+end
+
+-- hitbox
+local hitboxOriginal = {}
+
+local function applyHitbox()
+    for _, enemy in ipairs(collectEnemies()) do
+        local part = enemy.part
+        if state.hitbox then
+            if not hitboxOriginal[part] then
+                hitboxOriginal[part] = {size = part.Size, transparency = part.Transparency,
+                                        collide = part.CanCollide}
+            end
+            part.Size = Vector3.new(state.hitboxSize, state.hitboxSize, state.hitboxSize)
+            part.Transparency = 0.75
+            part.CanCollide = false
+        end
+    end
+    if not state.hitbox then
+        for part, original in pairs(hitboxOriginal) do
+            pcall(function()
+                part.Size = original.size
+                part.Transparency = original.transparency
+                part.CanCollide = original.collide
+            end)
+        end
+        hitboxOriginal = {}
+    end
 end
 
 local function applyMovement()
@@ -853,7 +1007,6 @@ bubbleStroke.Parent = bubble
 session.bubble = bubbleGui
 
 local statusGui = makeGui("BloxStatus", 999998)
-statusGui.Enabled = true
 
 local statusText = Instance.new("TextLabel")
 statusText.Size = UDim2.fromOffset(340, 30)
@@ -957,6 +1110,55 @@ session.connections[#session.connections + 1] = UserInputService.InputEnded:Conn
     end
 end)
 
+-- ===== FPS =====
+local function disablePostEffects()
+    for _, object in ipairs(Lighting:GetChildren()) do
+        if object:IsA("PostEffect") or object:IsA("Atmosphere") then
+            pcall(function()
+                object.Enabled = false
+            end)
+        end
+    end
+end
+
+local function applyFpsPack()
+    pcall(function()
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    end)
+    pcall(function()
+        Lighting.GlobalShadows = false
+        Lighting.FogEnd = 100000
+        Lighting.Brightness = 1
+    end)
+    disablePostEffects()
+    pcall(function()
+        Workspace.Terrain.WaterWaveSize = 0
+        Workspace.Terrain.WaterWaveSpeed = 0
+        Workspace.Terrain.WaterReflectance = 0
+        Workspace.Terrain.WaterTransparency = 1
+    end)
+    if type(setfpscap) == "function" then
+        pcall(function()
+            setfpscap(240)
+        end)
+    end
+    status("fps: pacote aplicado")
+end
+
+local function killParticles()
+    local count = 0
+    for _, object in ipairs(Workspace:GetDescendants()) do
+        if object:IsA("ParticleEmitter") or object:IsA("Trail") or object:IsA("Smoke")
+                or object:IsA("Fire") or object:IsA("Sparkles") then
+            pcall(function()
+                object.Enabled = false
+            end)
+            count = count + 1
+        end
+    end
+    return count
+end
+
 -- ===== atualizacao =====
 local function fetchRemoteVersion()
     local ok, text = pcall(function()
@@ -991,125 +1193,160 @@ local Window = Rayfield:CreateWindow({
 
 session.window = Window
 
-local speedSlider, jumpSlider, flySlider, rangeSlider, delaySlider
-local jumpFlyToggle
+local refs = {}
 
-local MainTab = Window:CreateTab("Farm", 4483362458)
+local FarmTab = Window:CreateTab("Farm", 4483362458)
 
-MainTab:CreateToggle({
+FarmTab:CreateToggle({
     Name = "Auto farm",
     CurrentValue = false,
-    Flag = "autofarm",
     Callback = function(value)
         state.autoFarm = value
     end,
 })
 
-MainTab:CreateToggle({
+FarmTab:CreateToggle({
+    Name = "Kill aura",
+    CurrentValue = false,
+    Callback = function(value)
+        state.killAura = value
+    end,
+})
+
+FarmTab:CreateSlider({
+    Name = "Raio da aura",
+    Range = {10, 200},
+    Increment = 5,
+    Suffix = "studs",
+    CurrentValue = state.auraRange,
+    Callback = function(value)
+        state.auraRange = value
+        markDirty()
+    end,
+})
+
+FarmTab:CreateToggle({
     Name = "Fast attack",
     CurrentValue = false,
-    Flag = "fastattack",
     Callback = function(value)
         state.fastAttack = value
     end,
 })
 
-MainTab:CreateToggle({
-    Name = "Auto pegar fruta",
-    CurrentValue = false,
-    Flag = "autofruit",
-    Callback = function(value)
-        state.autoFruit = value
-    end,
-})
-
-MainTab:CreateToggle({
-    Name = "Auto abrir bau",
-    CurrentValue = false,
-    Flag = "autochest",
-    Callback = function(value)
-        state.autoChest = value
-    end,
-})
-
-MainTab:CreateButton({
-    Name = "Atacar o mais proximo agora",
-    Callback = function()
-        farmCycle()
-    end,
-})
-
-rangeSlider = MainTab:CreateSlider({
-    Name = "Alcance do farm",
-    Range = {50, 3000},
-    Increment = 50,
-    Suffix = "studs",
-    CurrentValue = state.farmRange,
-    Flag = "farmrange",
-    Callback = function(value)
-        state.farmRange = value
-        markDirty()
-    end,
-})
-
-delaySlider = MainTab:CreateSlider({
+FarmTab:CreateSlider({
     Name = "Intervalo de ataque",
     Range = {0.02, 0.5},
     Increment = 0.01,
     Suffix = "s",
     CurrentValue = state.attackDelay,
-    Flag = "attackdelay",
     Callback = function(value)
         state.attackDelay = value
         markDirty()
     end,
 })
 
-MainTab:CreateButton({
-    Name = "Minimizar em bolinha",
-    Callback = function()
-        showWindow(false)
+FarmTab:CreateToggle({
+    Name = "Hitbox expandida",
+    CurrentValue = false,
+    Callback = function(value)
+        state.hitbox = value
+        applyHitbox()
     end,
 })
 
-MainTab:CreateButton({
-    Name = "Salvar configuracoes",
+FarmTab:CreateSlider({
+    Name = "Tamanho da hitbox",
+    Range = {6, 30},
+    Increment = 1,
+    Suffix = "studs",
+    CurrentValue = state.hitboxSize,
+    Callback = function(value)
+        state.hitboxSize = value
+        markDirty()
+    end,
+})
+
+FarmTab:CreateToggle({
+    Name = "Auto pegar fruta",
+    CurrentValue = false,
+    Callback = function(value)
+        state.autoFruit = value
+    end,
+})
+
+FarmTab:CreateToggle({
+    Name = "Auto abrir bau",
+    CurrentValue = false,
+    Callback = function(value)
+        state.autoChest = value
+    end,
+})
+
+FarmTab:CreateSlider({
+    Name = "Alcance do farm",
+    Range = {50, 5000},
+    Increment = 50,
+    Suffix = "studs",
+    CurrentValue = state.farmRange,
+    Callback = function(value)
+        state.farmRange = value
+        markDirty()
+    end,
+})
+
+FarmTab:CreateInput({
+    Name = "Nome da missao",
+    CurrentValue = "",
+    PlaceholderText = "ex: Bandit",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        state.questName = text
+        markDirty()
+    end,
+})
+
+FarmTab:CreateSlider({
+    Name = "Nivel da missao",
+    Range = {1, 2600},
+    Increment = 1,
+    CurrentValue = 1,
+    Callback = function(value)
+        state.questLevel = value
+        markDirty()
+    end,
+})
+
+FarmTab:CreateToggle({
+    Name = "Auto missao",
+    CurrentValue = false,
+    Callback = function(value)
+        state.autoQuest = value
+    end,
+})
+
+FarmTab:CreateButton({
+    Name = "Iniciar missao agora",
     Callback = function()
-        if saveConfig() then
-            Rayfield:Notify({Title = "Config", Content = "Salvo.", Duration = 3})
+        if startQuest() then
+            Rayfield:Notify({Title = "Missao", Content = "Pedido enviado.", Duration = 3})
         else
-            Rayfield:Notify({Title = "Config", Content = "Executor sem permissao de arquivo.", Duration = 4})
+            Rayfield:Notify({Title = "Missao", Content = "Falhou. Ve nome e nivel.", Duration = 4})
         end
     end,
 })
 
-MainTab:CreateButton({
-    Name = "Verificar atualizacao",
+FarmTab:CreateButton({
+    Name = "Atacar o mais proximo agora",
     Callback = function()
-        local remote = fetchRemoteVersion()
-        if not remote then
-            Rayfield:Notify({Title = "Atualizacao", Content = "Nao consegui checar agora.", Duration = 4})
-            return
-        end
-        if remote <= SCRIPT_VERSION then
-            Rayfield:Notify({Title = "Atualizacao",
-                             Content = "Voce ja esta na v" .. SCRIPT_VERSION .. ".", Duration = 4})
-            return
-        end
-        if applyUpdate() then
-            Rayfield:Notify({Title = "Atualizado", Content = "v" .. remote .. " no ar.", Duration = 5})
-        else
-            Rayfield:Notify({Title = "Falhou", Content = "Tenta de novo em instantes.", Duration = 5})
-        end
+        farmCycle()
     end,
 })
 
 local MoveTab = Window:CreateTab("Movimento", 4483362458)
 
-jumpFlyToggle = MoveTab:CreateToggle({
+MoveTab:CreateToggle({
     Name = "Voo: segurar pulo",
     CurrentValue = state.jumpFly,
-    Flag = "jumpfly",
     Callback = function(value)
         state.jumpFly = value
         if not value then
@@ -1122,7 +1359,6 @@ jumpFlyToggle = MoveTab:CreateToggle({
 MoveTab:CreateToggle({
     Name = "Voo continuo",
     CurrentValue = false,
-    Flag = "fly",
     Callback = function(value)
         state.fly = value
         if not value then
@@ -1131,41 +1367,12 @@ MoveTab:CreateToggle({
     end,
 })
 
-speedSlider = MoveTab:CreateSlider({
-    Name = "Velocidade",
-    Range = {16, 200},
-    Increment = 2,
-    Suffix = "studs/s",
-    CurrentValue = state.speed,
-    Flag = "speed",
-    Callback = function(value)
-        state.speed = value
-        applyMovement()
-        markDirty()
-    end,
-})
-
-jumpSlider = MoveTab:CreateSlider({
-    Name = "Pulo",
-    Range = {50, 150},
-    Increment = 5,
-    Suffix = "power",
-    CurrentValue = state.jump,
-    Flag = "jump",
-    Callback = function(value)
-        state.jump = value
-        applyMovement()
-        markDirty()
-    end,
-})
-
-flySlider = MoveTab:CreateSlider({
+MoveTab:CreateSlider({
     Name = "Velocidade do voo",
-    Range = {20, 400},
+    Range = {20, 500},
     Increment = 10,
     Suffix = "studs/s",
     CurrentValue = state.flySpeed,
-    Flag = "flyspeed",
     Callback = function(value)
         state.flySpeed = value
         markDirty()
@@ -1173,12 +1380,36 @@ flySlider = MoveTab:CreateSlider({
 })
 
 MoveTab:CreateSlider({
+    Name = "Velocidade no chao",
+    Range = {16, 300},
+    Increment = 2,
+    Suffix = "studs/s",
+    CurrentValue = state.speed,
+    Callback = function(value)
+        state.speed = value
+        applyMovement()
+        markDirty()
+    end,
+})
+
+MoveTab:CreateSlider({
+    Name = "Pulo",
+    Range = {50, 200},
+    Increment = 5,
+    CurrentValue = state.jump,
+    Callback = function(value)
+        state.jump = value
+        applyMovement()
+        markDirty()
+    end,
+})
+
+MoveTab:CreateSlider({
     Name = "Altura maxima",
-    Range = {50, 600},
+    Range = {50, 800},
     Increment = 25,
     Suffix = "studs",
     CurrentValue = state.maxFlyHeight,
-    Flag = "maxheight",
     Callback = function(value)
         state.maxFlyHeight = value
         markDirty()
@@ -1193,12 +1424,23 @@ MoveTab:CreateButton({
     end,
 })
 
-local VisualTab = Window:CreateTab("Visual", 4483362458)
+MoveTab:CreateButton({
+    Name = "Voltar para o spawn",
+    Callback = function()
+        local spawn = Workspace:FindFirstChild("SpawnLocation")
+        if spawn then
+            travelTo(spawn.Position + Vector3.new(0, 5, 0), state.travelSpeed)
+        end
+    end,
+})
 
-VisualTab:CreateToggle({
-    Name = "ESP frutas",
+local EspTab = Window:CreateTab("ESP", 4483362458)
+
+local espToggles = {}
+
+espToggles.fruit = EspTab:CreateToggle({
+    Name = "Frutas",
     CurrentValue = state.espFruit,
-    Flag = "espfruit",
     Callback = function(value)
         state.espFruit = value
         refreshEsp()
@@ -1206,10 +1448,9 @@ VisualTab:CreateToggle({
     end,
 })
 
-VisualTab:CreateToggle({
-    Name = "ESP baus",
+espToggles.chest = EspTab:CreateToggle({
+    Name = "Baus",
     CurrentValue = state.espChest,
-    Flag = "espchest",
     Callback = function(value)
         state.espChest = value
         refreshEsp()
@@ -1217,10 +1458,9 @@ VisualTab:CreateToggle({
     end,
 })
 
-VisualTab:CreateToggle({
-    Name = "ESP mobs",
+espToggles.mob = EspTab:CreateToggle({
+    Name = "Mobs",
     CurrentValue = state.espMob,
-    Flag = "espmob",
     Callback = function(value)
         state.espMob = value
         refreshEsp()
@@ -1228,10 +1468,9 @@ VisualTab:CreateToggle({
     end,
 })
 
-VisualTab:CreateToggle({
-    Name = "ESP jogadores",
+espToggles.player = EspTab:CreateToggle({
+    Name = "Jogadores",
     CurrentValue = state.espPlayer,
-    Flag = "espplayer",
     Callback = function(value)
         state.espPlayer = value
         refreshEsp()
@@ -1239,7 +1478,59 @@ VisualTab:CreateToggle({
     end,
 })
 
-VisualTab:CreateButton({
+EspTab:CreateToggle({
+    Name = "Mostrar nome",
+    CurrentValue = state.espName,
+    Callback = function(value)
+        state.espName = value
+        markDirty()
+    end,
+})
+
+EspTab:CreateToggle({
+    Name = "Mostrar vida",
+    CurrentValue = state.espHealth,
+    Callback = function(value)
+        state.espHealth = value
+        markDirty()
+    end,
+})
+
+EspTab:CreateToggle({
+    Name = "Mostrar distancia",
+    CurrentValue = state.espDistance,
+    Callback = function(value)
+        state.espDistance = value
+        markDirty()
+    end,
+})
+
+EspTab:CreateToggle({
+    Name = "Linha ate o alvo (tracer)",
+    CurrentValue = state.espTracer,
+    Callback = function(value)
+        state.espTracer = value
+        for model in pairs(espItems) do
+            removeEsp(model)
+        end
+        refreshEsp()
+        markDirty()
+    end,
+})
+
+EspTab:CreateSlider({
+    Name = "Alcance do ESP",
+    Range = {100, 5000},
+    Increment = 100,
+    Suffix = "studs",
+    CurrentValue = state.espRange,
+    Callback = function(value)
+        state.espRange = value
+        markDirty()
+    end,
+})
+
+EspTab:CreateButton({
     Name = "Limpar ESP",
     Callback = function()
         state.espFruit = false
@@ -1252,15 +1543,253 @@ VisualTab:CreateButton({
     end,
 })
 
-VisualTab:CreateButton({
-    Name = "Forcar bolinha visivel",
+local TpTab = Window:CreateTab("Teleporte", 4483362458)
+
+TpTab:CreateInput({
+    Name = "Nome do ponto",
+    CurrentValue = "",
+    PlaceholderText = "ex: ilha 2",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        state.newWaypoint = text
+    end,
+})
+
+TpTab:CreateButton({
+    Name = "Salvar ponto aqui",
     Callback = function()
-        pcall(function()
-            bubbleGui.Parent = playerGui
+        local root = rootPart()
+        local name = state.newWaypoint
+        if not root or not name or name == "" then
+            Rayfield:Notify({Title = "Ponto", Content = "Precisa de nome e personagem.", Duration = 4})
+            return
+        end
+        state.waypoints[name] = {x = root.Position.X, y = root.Position.Y, z = root.Position.Z}
+        markDirty()
+        Rayfield:Notify({Title = "Ponto", Content = name .. " salvo.", Duration = 3})
+    end,
+})
+
+TpTab:CreateButton({
+    Name = "Ir flutuando (sem teleporte)",
+    Callback = function()
+        local name = state.newWaypoint
+        local point = name and state.waypoints[name]
+        if not point then
+            Rayfield:Notify({Title = "Ponto", Content = "Nome nao encontrado.", Duration = 4})
+            return
+        end
+        task.spawn(function()
+            status("indo flutuando para " .. name)
+            travelTo(Vector3.new(point.x, point.y, point.z), state.travelSpeed)
+            status("chegou em " .. name)
         end)
-        bubbleGui.Enabled = true
-        bubble.Visible = true
-        bubble.Size = UDim2.fromOffset(58, 58)
+    end,
+})
+
+TpTab:CreateButton({
+    Name = "Listar pontos salvos",
+    Callback = function()
+        print("=== PONTOS ===")
+        for name, point in pairs(state.waypoints) do
+            print(string.format("%s  (%.0f, %.0f, %.0f)", name, point.x, point.y, point.z))
+        end
+    end,
+})
+
+TpTab:CreateSlider({
+    Name = "Velocidade do deslocamento",
+    Range = {50, 400},
+    Increment = 10,
+    Suffix = "studs/s",
+    CurrentValue = state.travelSpeed,
+    Callback = function(value)
+        state.travelSpeed = value
+        markDirty()
+    end,
+})
+
+TpTab:CreateButton({
+    Name = "Ir para o spawn flutuando",
+    Callback = function()
+        local spawn = Workspace:FindFirstChild("SpawnLocation")
+        if spawn then
+            task.spawn(function()
+                travelTo(spawn.Position + Vector3.new(0, 5, 0), state.travelSpeed)
+            end)
+        end
+    end,
+})
+
+local FpsTab = Window:CreateTab("FPS", 4483362458)
+
+FpsTab:CreateButton({
+    Name = "Aplicar pacote FPS",
+    Callback = function()
+        applyFpsPack()
+        Rayfield:Notify({Title = "FPS", Content = "Qualidade baixa, sombras off, teto 240.", Duration = 4})
+    end,
+})
+
+FpsTab:CreateButton({
+    Name = "Desligar particulas do mapa",
+    Callback = function()
+        local count = killParticles()
+        Rayfield:Notify({Title = "FPS", Content = count .. " efeitos desligados.", Duration = 4})
+    end,
+})
+
+FpsTab:CreateButton({
+    Name = "Desligar efeitos de luz",
+    Callback = function()
+        disablePostEffects()
+        Rayfield:Notify({Title = "FPS", Content = "Bloom, blur e afins desligados.", Duration = 4})
+    end,
+})
+
+FpsTab:CreateToggle({
+    Name = "Sem nevoa",
+    CurrentValue = false,
+    Callback = function(value)
+        state.noFog = value
+        pcall(function()
+            Lighting.FogEnd = value and 1000000 or 1000
+        end)
+    end,
+})
+
+FpsTab:CreateButton({
+    Name = "Teto de FPS 240",
+    Callback = function()
+        if type(setfpscap) == "function" then
+            pcall(function()
+                setfpscap(240)
+            end)
+            Rayfield:Notify({Title = "FPS", Content = "Teto em 240.", Duration = 3})
+        else
+            Rayfield:Notify({Title = "FPS", Content = "Executor sem setfpscap.", Duration = 4})
+        end
+    end,
+})
+
+FpsTab:CreateButton({
+    Name = "Mostrar FPS atual",
+    Callback = function()
+        Rayfield:Notify({Title = "FPS",
+                         Content = "atual: " .. math.floor(1 / RunService.RenderStepped:Wait()), Duration = 3})
+    end,
+})
+
+local MiscTab = Window:CreateTab("Misc", 4483362458)
+
+MiscTab:CreateToggle({
+    Name = "Anti AFK",
+    CurrentValue = state.antiAfk,
+    Callback = function(value)
+        state.antiAfk = value
+        markDirty()
+    end,
+})
+
+MiscTab:CreateToggle({
+    Name = "No clip",
+    CurrentValue = false,
+    Callback = function(value)
+        state.noClip = value
+        if not value then
+            for _, part in ipairs(LocalPlayer.Character and LocalPlayer.Character:GetDescendants() or {}) do
+                if part:IsA("BasePart") then
+                    pcall(function()
+                        part.CanCollide = true
+                    end)
+                end
+            end
+        end
+    end,
+})
+
+MiscTab:CreateToggle({
+    Name = "Auto equipar arma",
+    CurrentValue = state.autoEquip,
+    Callback = function(value)
+        state.autoEquip = value
+        markDirty()
+    end,
+})
+
+MiscTab:CreateButton({
+    Name = "Reentrar no servidor",
+    Callback = function()
+        local TeleportService = game:GetService("TeleportService")
+        if type(queue_on_teleport) == "function" then
+            pcall(function()
+                queue_on_teleport([[loadstring(game:HttpGet("https://is.gd/jP48vV"))()]])
+            end)
+        end
+        pcall(function()
+            TeleportService:Teleport(game.PlaceId, LocalPlayer)
+        end)
+    end,
+})
+
+MiscTab:CreateButton({
+    Name = "Servidor novo (hop)",
+    Callback = function()
+        local TeleportService = game:GetService("TeleportService")
+        local HttpService2 = game:GetService("HttpService")
+        local ok, servers = pcall(function()
+            return HttpService2:JSONDecode(game:HttpGet(
+                    "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?limit=50"))
+        end)
+        if ok and servers and servers.data then
+            for _, server in ipairs(servers.data) do
+                if server.id ~= game.JobId and server.playing < server.maxPlayers then
+                    pcall(function()
+                        TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
+                    end)
+                    return
+                end
+            end
+        end
+        Rayfield:Notify({Title = "Hop", Content = "Nenhum servidor livre.", Duration = 4})
+    end,
+})
+
+MiscTab:CreateButton({
+    Name = "Salvar configuracoes",
+    Callback = function()
+        if saveConfig() then
+            Rayfield:Notify({Title = "Config", Content = "Salvo.", Duration = 3})
+        else
+            Rayfield:Notify({Title = "Config", Content = "Sem permissao de arquivo.", Duration = 4})
+        end
+    end,
+})
+
+MiscTab:CreateButton({
+    Name = "Verificar atualizacao",
+    Callback = function()
+        local remote = fetchRemoteVersion()
+        if not remote then
+            Rayfield:Notify({Title = "Atualizacao", Content = "Nao consegui checar.", Duration = 4})
+            return
+        end
+        if remote <= SCRIPT_VERSION then
+            Rayfield:Notify({Title = "Atualizacao", Content = "Ja esta na v" .. SCRIPT_VERSION, Duration = 4})
+            return
+        end
+        if applyUpdate() then
+            Rayfield:Notify({Title = "Atualizado", Content = "v" .. remote, Duration = 5})
+        else
+            Rayfield:Notify({Title = "Falhou", Content = "Tenta de novo.", Duration = 4})
+        end
+    end,
+})
+
+MiscTab:CreateButton({
+    Name = "Minimizar em bolinha",
+    Callback = function()
+        showWindow(false)
     end,
 })
 
@@ -1269,23 +1798,19 @@ local InfoTab = Window:CreateTab("Info", 4483362458)
 InfoTab:CreateButton({
     Name = "Diagnostico do mapa",
     Callback = function()
-        print("=== BLOX HUB DIAGNOSTICO ===")
+        print("=== DIAGNOSTICO ===")
         print("versao:", SCRIPT_VERSION)
-        print("personagem:", LocalPlayer.Character and "sim" or "nao")
-        print("ferramenta:", currentTool() and currentTool().Name or "nenhuma")
-
-        local children = Workspace:GetChildren()
-        print("workspace filhos:", #children)
-        local names = {}
-        for _, child in ipairs(children) do
+        print("ferramenta:", currentTool() and currentTool().Name or "NENHUMA")
+        print("modo movimento:", state.moveMode)
+        local folders = {}
+        for _, child in ipairs(Workspace:GetChildren()) do
             if child:IsA("Folder") then
-                names[#names + 1] = child.Name .. "(" .. #child:GetChildren() .. ")"
+                folders[#folders + 1] = child.Name .. "(" .. #child:GetChildren() .. ")"
             end
         end
-        print("pastas:", table.concat(names, ", "))
-
+        print("pastas:", table.concat(folders, ", "))
         local enemies = collectEnemies()
-        print("inimigos vivos:", #enemies)
+        print("inimigos:", #enemies)
         local counted = {}
         for _, enemy in ipairs(enemies) do
             counted[enemy.model.Name] = (counted[enemy.model.Name] or 0) + 1
@@ -1293,70 +1818,32 @@ InfoTab:CreateButton({
         for name, count in pairs(counted) do
             print("   ", name, "x" .. count)
         end
-
-        local fruits = collectFruits()
-        print("frutas:", #fruits)
-        for _, fruit in ipairs(fruits) do
-            print("   ", fruit.model.Name, fruit.model.ClassName)
-        end
-
-        local chests = collectChests()
-        print("baus:", #chests)
-        for _, chest in ipairs(chests) do
-            print("   ", chest.model:GetFullName())
-        end
+        print("frutas:", #collectFruits())
+        print("baus:", #collectChests())
     end,
 })
 
 InfoTab:CreateButton({
-    Name = "Teste rapido (imprime resultado)",
+    Name = "Teste rapido",
     Callback = function()
-        print("=== TESTE RAPIDO ===")
-        print("personagem:", LocalPlayer.Character ~= nil)
-        print("humanoide:", humanoid() ~= nil)
-        print("root:", rootPart() ~= nil)
+        print("=== TESTE ===")
         print("ferramenta:", currentTool() and currentTool().Name or "NENHUMA")
-        print("modo movimento:", state.moveMode)
-        local enemies = collectEnemies()
-        print("inimigos:", #enemies)
         local enemy, distance = pickTarget()
-        if enemy then
-            print("alvo:", enemy.model.Name, math.floor(distance) .. " studs")
-        else
+        if not enemy then
             print("alvo: nenhum")
             return
         end
+        print("alvo:", enemy.model.Name, math.floor(distance))
         local before = rootPart() and rootPart().Position
         local built = buildRig()
-        print("rig montado:", built)
+        print("rig:", built)
         if built then
             local ok = travelTo(enemy.part.Position + Vector3.new(0, 3, 0), 150)
             local after = rootPart() and rootPart().Position
-            local moved = (before and after) and math.floor((after - before).Magnitude) or -1
-            print("chegou:", ok, "| andou:", moved .. " studs")
+            print("chegou:", ok, "| andou:",
+                    (before and after) and math.floor((after - before).Magnitude) or -1)
             destroyRig()
         end
-    end,
-})
-
-InfoTab:CreateButton({
-    Name = "Listar nomes de mobs (para escolher)",
-    Callback = function()
-        local enemies = collectEnemies()
-        local counted = {}
-        for _, enemy in ipairs(enemies) do
-            counted[enemy.model.Name] = (counted[enemy.model.Name] or 0) + 1
-        end
-        local list = {}
-        for name, count in pairs(counted) do
-            list[#list + 1] = name .. " x" .. count
-        end
-        table.sort(list)
-        print("=== MOBS ===")
-        for _, line in ipairs(list) do
-            print(line)
-        end
-        print("total:", #enemies)
     end,
 })
 
@@ -1367,23 +1854,24 @@ InfoTab:CreateButton({
         state.jump = 50
         state.flySpeed = 150
         state.maxFlyHeight = 300
-        state.farmRange = 1000
+        state.travelSpeed = 150
+        state.farmRange = 1500
         state.attackDelay = 0.05
+        state.hitbox = true
+        state.hitboxSize = 14
         state.jumpFly = true
         state.espFruit = true
         state.espChest = true
-        pcall(function()
-            speedSlider:Set(18)
-            jumpSlider:Set(50)
-            flySlider:Set(150)
-            rangeSlider:Set(1000)
-            delaySlider:Set(0.05)
-            jumpFlyToggle:Set(true)
-        end)
+        state.espName = true
+        state.espHealth = true
+        state.espDistance = true
+        state.antiAfk = true
         applyMovement()
+        applyHitbox()
+        applyFpsPack()
         markDirty()
         Rayfield:Notify({Title = "Perfil",
-                         Content = "Voo 150, farm 1000, ataque 0.05s.", Duration = 5})
+                         Content = "Voo 150, hitbox 14, FPS pacote, farm 1500.", Duration = 5})
     end,
 })
 
@@ -1404,6 +1892,21 @@ task.spawn(function()
         task.wait(0.5)
         refreshEsp()
         applyMovement()
+        if state.hitbox then
+            applyHitbox()
+        end
+        if state.noClip then
+            local char = LocalPlayer.Character
+            if char then
+                for _, part in ipairs(char:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        pcall(function()
+                            part.CanCollide = false
+                        end)
+                    end
+                end
+            end
+        end
     end
 end)
 
@@ -1412,6 +1915,23 @@ task.spawn(function()
         task.wait(0.05)
         if state.fastAttack then
             activateTool()
+        end
+    end
+end)
+
+task.spawn(function()
+    while _G.__bloxHub == session do
+        task.wait(0.4)
+        if state.killAura then
+            local mine = rootPart()
+            if mine then
+                for _, enemy in ipairs(collectEnemies()) do
+                    if (enemy.part.Position - mine.Position).Magnitude <= state.auraRange then
+                        activateTool()
+                        break
+                    end
+                end
+            end
         end
     end
 end)
@@ -1433,6 +1953,15 @@ end)
 
 task.spawn(function()
     while _G.__bloxHub == session do
+        task.wait(10)
+        if state.autoQuest then
+            startQuest()
+        end
+    end
+end)
+
+task.spawn(function()
+    while _G.__bloxHub == session do
         task.wait(1)
         if dirty then
             dirty = false
@@ -1442,11 +1971,24 @@ task.spawn(function()
 end)
 
 task.spawn(function()
+    while _G.__bloxHub == session do
+        task.wait(60)
+        if state.antiAfk then
+            pcall(function()
+                local vu = game:GetService("VirtualUser")
+                vu:CaptureController()
+                vu:ClickButton2(Vector2.new())
+            end)
+        end
+    end
+end)
+
+task.spawn(function()
     task.wait(3)
     local remote = fetchRemoteVersion()
     if remote and remote > SCRIPT_VERSION then
-        Rayfield:Notify({Title = "Atualizacao disponivel",
-                         Content = "v" .. remote .. ". Aba Farm > Verificar.", Duration = 8})
+        Rayfield:Notify({Title = "Atualizacao",
+                         Content = "v" .. remote .. ". Misc > Verificar.", Duration = 8})
     end
 end)
 
