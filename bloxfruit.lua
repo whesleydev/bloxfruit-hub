@@ -2,7 +2,7 @@
 -- executor: Delta, Xeno, Solara, Fluxus, Wave
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/bloxfruit-hub/main"
-local SCRIPT_VERSION = 5
+local SCRIPT_VERSION = 6
 local CONFIG_PATH = "bloxfruit_config.json"
 
 local Players = game:GetService("Players")
@@ -86,6 +86,8 @@ local state = {
     colorMob = {255, 80, 80},
     colorPlayer = {80, 160, 255},
 
+    verboseLogs = true,
+    showLogPanel = false,
     antiAfk = true,
     noClip = false,
     fpsPack = false,
@@ -192,7 +194,68 @@ local function status(text)
     if statusLabel then
         statusLabel.Text = text
     end
+    if Log then
+        Log.add("INFO", text)
+    end
 end
+
+
+-- ===== log =====
+local LOG_PATH = "bloxfruit_log.txt"
+local LOG_MAX = 500
+
+local Log = {
+    lines = {},
+    entries = {},
+    verbose = true,
+    dirtyPanel = false,
+    panelLines = {},
+}
+
+local function stamp()
+    local ok, value = pcall(function()
+        return os.date("%H:%M:%S")
+    end)
+    return ok and value or "??:??:??"
+end
+
+function Log.add(level, text)
+    local line = string.format("[%s] %-5s %s", stamp(), level, tostring(text))
+    Log.lines[#Log.lines + 1] = line
+    if #Log.lines > LOG_MAX then
+        table.remove(Log.lines, 1)
+    end
+    Log.entries[#Log.entries + 1] = {level = level, text = tostring(text), time = stamp()}
+    if #Log.entries > LOG_MAX then
+        table.remove(Log.entries, 1)
+    end
+    Log.dirtyPanel = true
+    if state.verboseLogs then
+        print(line)
+    end
+end
+
+function Log.dump()
+    return table.concat(Log.lines, "\n")
+end
+
+function Log.clear()
+    Log.lines = {}
+    Log.entries = {}
+    Log.dirtyPanel = true
+end
+
+function Log.guard(name, fn)
+    return function(...)
+        local ok, err = pcall(fn, ...)
+        if not ok then
+            Log.add("ERRO", name .. ": " .. tostring(err))
+        end
+        return ok
+    end
+end
+
+session.Log = Log
 
 local function humanoid()
     local char = LocalPlayer.Character
@@ -426,6 +489,8 @@ local function travelTo(target, speed)
     if owned then
         destroyRig()
     end
+    Log.add(reached and "ACAO" or "AVISO",
+            string.format("deslocamento %s | modo %s", reached and "ok" or "incompleto", state.moveMode))
     return reached
 end
 
@@ -799,6 +864,7 @@ local function serverTouch(part)
         task.wait(0.05)
         firetouchinterest(part, hrp, 1)
     end)
+    Log.add(ok and "ACAO" or "ERRO", "touch em " .. tostring(part and part:GetFullName()))
     return ok
 end
 
@@ -821,6 +887,7 @@ local function serverPrompts(radius)
             end
         end
     end
+    Log.add("ACAO", "prompts disparados: " .. fired)
     return fired
 end
 
@@ -864,6 +931,7 @@ local function farmCycle()
         return false
     end
     status(string.format("farm: %s | %d", enemy.model.Name, math.floor(distance)))
+    Log.add("ACAO", string.format("farm alvo %s a %d studs", enemy.model.Name, math.floor(distance)))
 
     local owned = false
     if not flyRig.active then
@@ -899,6 +967,7 @@ end
 
 local function fruitCycle()
     local fruits = collectFruits()
+    Log.add("INFO", "frutas no mapa: " .. #fruits)
     if #fruits == 0 then
         status("fruta: nenhuma")
         return false
@@ -927,6 +996,7 @@ end
 
 local function chestCycle()
     local chests = collectChests()
+    Log.add("INFO", "baus no mapa: " .. #chests)
     if #chests == 0 then
         status("bau: nenhum")
         return false
@@ -1180,6 +1250,172 @@ end)
 
 session.showPreview = showPreview
 session.hidePreview = hidePreview
+
+
+-- ===== painel de log =====
+local logGui = makeGui("BloxLogPanel", 999996)
+logGui.Enabled = false
+
+local logFrame = Instance.new("Frame")
+logFrame.Size = UDim2.fromOffset(560, 280)
+logFrame.Position = UDim2.new(0, 18, 1, -310)
+logFrame.BackgroundColor3 = Color3.fromRGB(10, 12, 17)
+logFrame.BackgroundTransparency = 0.08
+logFrame.BorderSizePixel = 0
+logFrame.Active = true
+logFrame.Parent = logGui
+
+local logCorner = Instance.new("UICorner")
+logCorner.CornerRadius = UDim.new(0, 12)
+logCorner.Parent = logFrame
+
+local logStroke = Instance.new("UIStroke")
+logStroke.Color = Color3.fromRGB(60, 90, 140)
+logStroke.Thickness = 1.5
+logStroke.Transparency = 0.4
+logStroke.Parent = logFrame
+
+local logTitle = Instance.new("TextLabel")
+logTitle.Size = UDim2.new(1, -50, 0, 26)
+logTitle.Position = UDim2.fromOffset(12, 4)
+logTitle.BackgroundTransparency = 1
+logTitle.Font = Enum.Font.GothamBold
+logTitle.TextSize = 13
+logTitle.TextColor3 = Color3.fromRGB(150, 190, 255)
+logTitle.TextXAlignment = Enum.TextXAlignment.Left
+logTitle.Text = "log do hub"
+logTitle.Parent = logFrame
+
+local logClose = Instance.new("TextButton")
+logClose.Size = UDim2.fromOffset(24, 24)
+logClose.Position = UDim2.new(1, -30, 0, 3)
+logClose.BackgroundColor3 = Color3.fromRGB(40, 25, 25)
+logClose.Text = "x"
+logClose.TextColor3 = Color3.fromRGB(255, 120, 120)
+logClose.Font = Enum.Font.GothamBold
+logClose.TextSize = 13
+logClose.BorderSizePixel = 0
+logClose.Parent = logFrame
+
+local logScroll = Instance.new("ScrollingFrame")
+logScroll.Size = UDim2.new(1, -16, 1, -36)
+logScroll.Position = UDim2.fromOffset(8, 30)
+logScroll.BackgroundTransparency = 1
+logScroll.BorderSizePixel = 0
+logScroll.ScrollBarThickness = 4
+logScroll.ScrollBarImageColor3 = Color3.fromRGB(80, 120, 180)
+logScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+logScroll.Parent = logFrame
+
+local logLayout = Instance.new("UIListLayout")
+logLayout.Padding = UDim.new(0, 1)
+logLayout.SortOrder = Enum.SortOrder.LayoutOrder
+logLayout.Parent = logScroll
+
+local logColors = {
+    INFO = Color3.fromRGB(170, 180, 200),
+    ACAO = Color3.fromRGB(120, 230, 150),
+    AVISO = Color3.fromRGB(255, 210, 110),
+    ERRO = Color3.fromRGB(255, 110, 110),
+}
+
+local function rebuildLogPanel()
+    for _, child in ipairs(logScroll:GetChildren()) do
+        if child:IsA("TextLabel") then
+            child:Destroy()
+        end
+    end
+    local entries = Log.entries
+    local first = math.max(1, #entries - 120)
+    for index = first, #entries do
+        local entry = entries[index]
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(1, -6, 0, 15)
+        label.BackgroundTransparency = 1
+        label.Font = Enum.Font.Code
+        label.TextSize = 11
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.TextColor3 = logColors[entry.level] or logColors.INFO
+        label.Text = string.format("%s %s", entry.time, entry.text)
+        label.LayoutOrder = index
+        label.Parent = logScroll
+    end
+    logScroll.CanvasSize = UDim2.new(0, 0, 0, #entries * 16)
+    logScroll.CanvasPosition = Vector2.new(0, math.max(0, #entries * 16 - 240))
+end
+
+logClose.MouseButton1Click:Connect(function()
+    state.showLogPanel = false
+    logGui.Enabled = false
+end)
+
+local logDrag = false
+local logStart = nil
+local logOrigin = nil
+
+logFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+        logDrag = true
+        logStart = input.Position
+        logOrigin = logFrame.Position
+    end
+end)
+
+session.connections[#session.connections + 1] = UserInputService.InputChanged:Connect(function(input)
+    if not logDrag then
+        return
+    end
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch then
+        local delta = input.Position - logStart
+        logFrame.Position = UDim2.new(logOrigin.X.Scale, logOrigin.X.Offset + delta.X,
+                logOrigin.Y.Scale, logOrigin.Y.Offset + delta.Y)
+    end
+end)
+
+session.connections[#session.connections + 1] = UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+        logDrag = false
+    end
+end)
+
+session.logGui = logGui
+
+local function setLogPanel(show)
+    state.showLogPanel = show
+    logGui.Enabled = show
+    if show then
+        rebuildLogPanel()
+    end
+end
+
+local function uploadLogs()
+    local body = Log.dump()
+    if #body < 5 then
+        return nil, "log vazio"
+    end
+    local ok, result = pcall(function()
+        return game:HttpPost("https://paste.rs", body, "text/plain")
+    end)
+    if ok and type(result) == "string" then
+        local url = string.match(result, "https?://%S+")
+        if url then
+            return url
+        end
+    end
+    local ok2, result2 = pcall(function()
+        return HttpService:PostAsync("https://paste.rs", body, Enum.HttpContentType.TextPlain)
+    end)
+    if ok2 and type(result2) == "string" then
+        local url = string.match(result2, "https?://%S+")
+        if url then
+            return url
+        end
+    end
+    return nil, tostring(result)
+end
 
 local bubbleGui = makeGui("BloxBubble", 999999)
 
@@ -2121,6 +2357,102 @@ MiscTab:CreateButton({
     end,
 })
 
+local LogTab = Window:CreateTab("Logs", 4483362458)
+
+LogTab:CreateToggle({
+    Name = "Painel de log na tela",
+    CurrentValue = false,
+    Callback = function(value)
+        setLogPanel(value)
+    end,
+})
+
+LogTab:CreateToggle({
+    Name = "Log verboso (console)",
+    CurrentValue = state.verboseLogs,
+    Callback = function(value)
+        state.verboseLogs = value
+    end,
+})
+
+LogTab:CreateButton({
+    Name = "Copiar logs",
+    Callback = function()
+        local text = Log.dump()
+        if type(setclipboard) == "function" then
+            pcall(function()
+                setclipboard(text)
+            end)
+            Rayfield:Notify({Title = "Logs", Content = #Log.lines .. " linhas copiadas.", Duration = 4})
+        else
+            print(text)
+            Rayfield:Notify({Title = "Logs", Content = "Sem clipboard. Imprimi no console.", Duration = 5})
+        end
+    end,
+})
+
+LogTab:CreateButton({
+    Name = "Enviar logs (gera link)",
+    Callback = function()
+        Rayfield:Notify({Title = "Logs", Content = "Enviando...", Duration = 2})
+        task.spawn(function()
+            local url, err = uploadLogs()
+            if url then
+                if type(setclipboard) == "function" then
+                    pcall(function()
+                        setclipboard(url)
+                    end)
+                end
+                Log.add("ACAO", "logs enviados: " .. url)
+                Rayfield:Notify({Title = "Logs", Content = url, Duration = 12})
+            else
+                Log.add("ERRO", "envio falhou: " .. tostring(err))
+                Rayfield:Notify({Title = "Logs",
+                                 Content = "Falhou. Usa Copiar logs.", Duration = 6})
+            end
+        end)
+    end,
+})
+
+LogTab:CreateButton({
+    Name = "Salvar logs em arquivo",
+    Callback = function()
+        if type(writefile) ~= "function" then
+            Rayfield:Notify({Title = "Logs", Content = "Executor sem writefile.", Duration = 4})
+            return
+        end
+        local ok = pcall(function()
+            writefile(LOG_PATH, Log.dump())
+        end)
+        Rayfield:Notify({Title = "Logs",
+                         Content = ok and ("salvo em " .. LOG_PATH) or "falhou", Duration = 4})
+    end,
+})
+
+LogTab:CreateButton({
+    Name = "Limpar logs",
+    Callback = function()
+        Log.clear()
+        rebuildLogPanel()
+    end,
+})
+
+LogTab:CreateButton({
+    Name = "Resumo do estado",
+    Callback = function()
+        Log.add("INFO", string.format(
+                "estado: farm=%s aura=%s fast=%s hitbox=%s voo=%s esp(f=%s c=%s m=%s p=%s) modo=%s",
+                tostring(state.autoFarm), tostring(state.killAura), tostring(state.fastAttack),
+                tostring(state.hitbox), tostring(state.fly or state.jumpFly),
+                tostring(state.espFruit), tostring(state.espChest), tostring(state.espMob),
+                tostring(state.espPlayer), state.moveMode))
+        Log.add("INFO", string.format("inimigos=%d frutas=%d baus=%d ferramenta=%s",
+                #collectEnemies(), #collectFruits(), #collectChests(),
+                currentTool() and currentTool().Name or "nenhuma"))
+        setLogPanel(true)
+    end,
+})
+
 local InfoTab = Window:CreateTab("Info", 4483362458)
 
 InfoTab:CreateButton({
@@ -2218,6 +2550,7 @@ session.connections[#session.connections + 1] = RunService.Heartbeat:Connect(fun
 end)
 
 LocalPlayer.CharacterAdded:Connect(function()
+    Log.add("INFO", "personagem carregado")
     destroyRig()
     task.wait(1)
     applyMovement()
@@ -2227,6 +2560,7 @@ end)
 task.spawn(function()
     while _G.__bloxHub == session do
         task.wait(0.5)
+        pcall(function()
         refreshEsp()
         applyMovement()
         if state.hitbox then
@@ -2244,6 +2578,7 @@ task.spawn(function()
                 end
             end
         end
+        end)
     end
 end)
 
@@ -2279,11 +2614,20 @@ task.spawn(function()
         if flyRig.active and flyRig.holdTimer > 0.45 then
             status("voo manual")
         elseif state.autoFarm then
-            farmCycle()
+            local ok, err = pcall(farmCycle)
+            if not ok then
+                Log.add("ERRO", "farmCycle: " .. tostring(err))
+            end
         elseif state.autoFruit then
-            fruitCycle()
+            local ok, err = pcall(fruitCycle)
+            if not ok then
+                Log.add("ERRO", "fruitCycle: " .. tostring(err))
+            end
         elseif state.autoChest then
-            chestCycle()
+            local ok, err = pcall(chestCycle)
+            if not ok then
+                Log.add("ERRO", "chestCycle: " .. tostring(err))
+            end
         end
     end
 end)
@@ -2293,6 +2637,16 @@ task.spawn(function()
         task.wait(10)
         if state.autoQuest then
             startQuest()
+        end
+    end
+end)
+
+task.spawn(function()
+    while _G.__bloxHub == session do
+        task.wait(0.4)
+        if state.showLogPanel and Log.dirtyPanel then
+            Log.dirtyPanel = false
+            pcall(rebuildLogPanel)
         end
     end
 end)
@@ -2350,4 +2704,9 @@ end)
 
 applyMovement()
 refreshEsp()
+Log.add("INFO", "hub v" .. SCRIPT_VERSION .. " carregado")
+Log.add("INFO", string.format("executor: %s | place: %s",
+        tostring(identifyexecutor and identifyexecutor() or "?"), tostring(game.PlaceId)))
+Log.add("INFO", string.format("inimigos=%d frutas=%d baus=%d",
+        #collectEnemies(), #collectFruits(), #collectChests()))
 print("blox hub v" .. SCRIPT_VERSION .. " carregado")
