@@ -2,7 +2,7 @@
 -- executor: Delta, Xeno, Solara, Fluxus, Wave
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/bloxfruit-hub/main"
-local SCRIPT_VERSION = 10
+local SCRIPT_VERSION = 11
 local CONFIG_PATH = "bloxfruit_config.json"
 
 local Players = game:GetService("Players")
@@ -462,7 +462,11 @@ local function travelTo(target, speed)
             if dt > 0.25 then
                 dt = 0.25
             end
-            local delta = target - flyRig.target
+            local current = flyRig.target
+            if not current then
+                break
+            end
+            local delta = target - current
             if delta.Magnitude < 6 then
                 arrived = true
                 break
@@ -540,6 +544,17 @@ local function touchSweep(seconds)
 end
 
 -- ===== alvos =====
+local descendantCache = {at = 0, list = {}}
+
+local function descendants()
+    if os.clock() - descendantCache.at < 3 then
+        return descendantCache.list
+    end
+    descendantCache.at = os.clock()
+    descendantCache.list = Workspace:GetDescendants()
+    return descendantCache.list
+end
+
 local function isPlayerCharacter(model)
     return Players:GetPlayerFromCharacter(model) ~= nil
 end
@@ -645,7 +660,7 @@ local function collectChests()
         end
     end
     if #out == 0 then
-        for _, object in ipairs(Workspace:GetDescendants()) do
+        for _, object in ipairs(descendants()) do
             if string.find(string.lower(object.Name), "chest", 1, true) then
                 consider(object)
             end
@@ -918,7 +933,7 @@ local function serverPrompts(radius)
         return 0
     end
     local fired = 0
-    for _, object in ipairs(Workspace:GetDescendants()) do
+    for _, object in ipairs(descendants()) do
         if object:IsA("ProximityPrompt") and object.Enabled then
             local parent = object.Parent
             local part = parent and (parent:IsA("BasePart") and parent
@@ -988,8 +1003,10 @@ local function farmCycle()
     travelTo(enemy.part.Position + Vector3.new(0, 3, 0), state.flySpeed)
 
     local started = os.clock()
+    local killed = false
     while os.clock() - started < 3 and _G.__bloxHub == session do
         if not enemy.model.Parent or not aliveRoot(enemy.model) then
+            killed = true
             break
         end
         local mine = rootPart()
@@ -1002,6 +1019,10 @@ local function farmCycle()
         activateTool()
         task.wait(state.attackDelay)
     end
+
+    Log.add(killed and "ACAO" or "AVISO", string.format("farm: %s %s | arma %s",
+            killed and "matou" or "nao matou", enemy.model.Name,
+            currentTool() and currentTool().Name or "NENHUMA"))
 
     if owned then
         destroyRig()
@@ -1042,7 +1063,7 @@ local function readQuest()
     return nil
 end
 
-local questRun = {npc = nil, index = 1, lastAccept = 0, lastLog = 0}
+local questRun = {npc = nil, index = 1, lastAccept = 0, lastLog = 0, lastStart = 0}
 
 local function playerLevel()
     local ok, value = pcall(function()
@@ -1056,7 +1077,7 @@ end
 
 local function collectQuestPrompts()
     local out = {}
-    for _, object in ipairs(Workspace:GetDescendants()) do
+    for _, object in ipairs(descendants()) do
         if object:IsA("ProximityPrompt") then
             local action = string.lower(object.ActionText or "")
             local label = string.lower(object.ObjectText or "")
@@ -1175,6 +1196,11 @@ end
 local function questCycle()
     local level = playerLevel()
     local info = readQuest()
+    if os.clock() - questRun.lastStart > 15 then
+        questRun.lastStart = os.clock()
+        Log.add("INFO", string.format("quest: ciclo | nivel %d | missao %s", level,
+                info and (info.current .. "/" .. info.total) or "nenhuma"))
+    end
 
     if info then
         if info.current > 0 then
@@ -2998,9 +3024,16 @@ task.spawn(function()
     end
 end)
 
+local lastCycleAt = os.clock()
+
 task.spawn(function()
     while _G.__bloxHub == session do
         task.wait(0.5)
+        if os.clock() - lastCycleAt > 30 then
+            lastCycleAt = os.clock()
+            Log.add("AVISO", "loop parado ha 30s (nenhum ciclo concluido)")
+        end
+        lastCycleAt = os.clock()
         if flyRig.active and flyRig.holdTimer > 0.45 then
             status("voo manual")
         elseif state.autoQuestFly then
